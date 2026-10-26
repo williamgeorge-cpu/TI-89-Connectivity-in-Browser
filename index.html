@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TI-89 WebUSB Link Utility</title>
+  <style>
+    body { font-family: sans-serif; margin: 30px; line-height: 1.6; }
+    .container { max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #ccc; border-radius: 8px; }
+    button { display: block; width: 100%; padding: 10px; margin: 10px 0; font-size: 16px; cursor: pointer; }
+    #status { font-weight: bold; color: #555; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>TI-89 Link Utility</h2>
+    <p>Status: <span id="status">Disconnected</span></p>
+    <button id="connectBtn">Connect to TI-89</button>
+    <hr>
+    <label for="fileInput">Select TI-89 File (.89g, .89z, etc.):</label>
+    <input type="file" id="fileInput" disabled>
+    <button id="sendBtn" disabled>Send File to Calculator</button>
+  </div>
+
+  <script>
+    const TI_VENDOR_ID = 0x0451; // Texas Instruments Vendor ID
+    let device;
+    let fileData = null;
+
+    const connectBtn = document.getElementById('connectBtn');
+    const sendBtn = document.getElementById('sendBtn');
+    const fileInput = document.getElementById('fileInput');
+    const statusText = document.getElementById('status');
+
+    connectBtn.addEventListener('click', async () => {
+      try {
+        statusText.textContent = "Requesting device pairing...";
+        device = await navigator.usb.requestDevice({
+          filters: [{ vendorId: TI_VENDOR_ID }]
+        });
+
+        await device.open();
+        
+        // Select the first available configuration safely
+        if (device.configuration === null) {
+          await device.selectConfiguration(device.configurations[0].configurationValue);
+        }
+
+        // Find the first valid interface instead of hardcoding interface 0
+        const intf = device.configuration.interfaces[0];
+        const intfNumber = intf.interfaceNumber;
+
+        await device.claimInterface(intfNumber);
+
+        statusText.textContent = `Connected: ${device.productName || 'TI Device'}`;
+        statusText.style.color = "green";
+        fileInput.disabled = false;
+      } catch (error) {
+        console.error(error);
+        statusText.textContent = `Connection failed: ${error.message}`;
+        statusText.style.color = "red";
+      }
+    });
+
+    fileInput.addEventListener('change', (event) => {
+      const file = event.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        fileData = new Uint8Array(e.target.result);
+        sendBtn.disabled = false;
+        statusText.textContent = `Loaded ${file.name} (${fileData.length} bytes)`;
+      };
+      reader.readAsArrayBuffer(file);
+    });
+
+    sendBtn.addEventListener('click', async () => {
+      if (!device || !fileData) return;
+      try {
+        statusText.textContent = "Sending file...";
+        const packet = buildTiPacket(fileData);
+
+        // Dynamically find an out-endpoint instead of hardcoding endpoint 1
+        const intf = device.configuration.interfaces[0];
+        const outEndpoint = intf.alternate.endpoints.find(e => e.direction === 'out');
+        if (!outEndpoint) {
+          throw new Error("No OUT endpoint found on this TI device interface.");
+        }
+
+        let result = await device.transferOut(outEndpoint.endpointNumber, packet);
+        if (result.status === 'ok') {
+          statusText.textContent = "Transfer complete!";
+          statusText.style.color = "blue";
+        } else {
+          statusText.textContent = `Transfer failed: ${result.status}`;
+        }
+      } catch (error) {
+        console.error(error);
+        statusText.textContent = `Error: ${error.message}`;
+        statusText.style.color = "red";
+      }
+    });
+
+    function buildTiPacket(rawBytes) {
+      const headerLength = 4;
+      const checksumLength = 2;
+      const totalLength = headerLength + rawBytes.length + checksumLength;
+      const packet = new Uint8Array(totalLength);
+
+      packet[0] = 0x08; // Machine ID
+      packet[1] = 0x06; // Command ID
+      packet[2] = rawBytes.length & 0xFF;
+      packet[3] = (rawBytes.length >> 8) & 0xFF;
+
+      packet.set(rawBytes, headerLength);
+
+      let checksum = 0;
+      for (let i = 0; i < rawBytes.length; i++) {
+        checksum = (checksum + rawBytes[i]) & 0xFFFF;
+      }
+
+      packet[totalLength - 2] = checksum & 0xFF;
+      packet[totalLength - 1] = (checksum >> 8) & 0xFF;
+      return packet;
+    }
+  </script>
+</body>
+</html>
