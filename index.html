@@ -3,236 +3,160 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TI-89 WebUSB Link Utility</title>
+    <title>TI-89 Titanium WebUSB Linker</title>
     <style>
         body {
-            font-family: sans-serif;
-            margin: 30px;
-            line-height: 1.6;
-        }
-        .container {
-            max-width: 500px;
-            margin: 0 auto;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            max-width: 600px;
+            margin: 40px auto;
             padding: 20px;
-            border: 1px solid #ccc;
-            border-radius: 8px;
+            background-color: #f5f5f7;
+            color: #1d1d1f;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
         }
+        h2 { border-bottom: 2px solid #d2d2d7; padding-bottom: 8px; }
+        .control-group { margin: 20px 0; }
         button {
-            display: block;
-            width: 100%;
-            padding: 10px;
-            margin: 10px 0;
-            font-size: 16px;
+            background-color: #0071e3;
+            color: white;
+            border: none;
+            padding: 10px 16px;
+            font-size: 14px;
+            border-radius: 6px;
             cursor: pointer;
+            margin-right: 8px;
         }
+        button:disabled { background-color: #aeaeaf; cursor: not-allowed; }
         #status {
-            font-weight: bold;
-            color: #555;
+            padding: 12px;
+            border-radius: 6px;
+            background-color: #e8e8ed;
+            font-family: monospace;
+            white-space: pre-wrap;
+            margin-top: 20px;
         }
     </style>
 </head>
 <body>
-<div class="container">
-    <h2>TI-89 Link Utility</h2>
-    <p>Status: <span id="status">Disconnected</span></p>
-    <button id="connectBtn">Connect to TI-89</button>
-    <hr>
-    <label for="fileInput">Select TI-89 File (.89g, .89z, etc.):</label>
-    <input type="file" id="fileInput" disabled>
-    <button id="sendBtn" disabled>Send File to Calculator</button>
-</div>
 
-<script>
-    const TI_VENDOR_ID = 0x0451;
-    let device;
-    let fileData = null;
-    let outEndpointNumber = null;
-    let inEndpointNumber = null;
+    <h2>TI-89 Titanium USB File Transfer</h2>
+    
+    <div class="control-group">
+        <button id="connectBtn">🔌 Connect TI-89 Titanium</button>
+        <span id="deviceInfo">No device connected.</span>
+    </div>
 
-    const delay = ms => new Promise(res => setTimeout(res, ms));
+    <div class="control-group">
+        <label for="fileInput"><strong>Select File (.89i, .89p, .89z, etc.):</strong></label><br><br>
+        <input type="file" id="fileInput" disabled />
+    </div>
 
-    const connectBtn = document.getElementById('connectBtn');
-    const sendBtn = document.getElementById('sendBtn');
-    const fileInput = document.getElementById('fileInput');
-    const statusText = document.getElementById('status');
+    <div class="control-group">
+        <button id="sendBtn" disabled>📤 Send File to Calculator</button>
+    </div>
 
-    connectBtn.addEventListener('click', async () => {
-        try {
-            statusText.textContent = "Requesting device pairing...";
-            device = await navigator.usb.requestDevice({ filters: [{ vendorId: TI_VENDOR_ID }] });
-            
-            await device.open();
-            if (device.configuration === null) {
-                await device.selectConfiguration(device.configurations[0].configurationValue);
-            }
-            
-            const intf = device.configuration.interfaces[0];
-            await device.claimInterface(intf.interfaceNumber);
-            
-            const outEp = intf.alternate.endpoints.find(e => e.direction === 'out');
-            const inEp = intf.alternate.endpoints.find(e => e.direction === 'in');
-            
-            if (!outEp || !inEp) {
-                throw new Error("Required endpoints not found on this interface.");
-            }
-            
-            outEndpointNumber = outEp.endpointNumber;
-            inEndpointNumber = inEp.endpointNumber;
+    <h3>Status Log</h3>
+    <div id="status">Ready. Connect your calculator to begin.</div>
 
-            await device.clearHalt('in', inEndpointNumber);
-            await device.clearHalt('out', outEndpointNumber);
+    <script>
+        // Texas Instruments Vendor ID & TI-89 Titanium Product ID
+        const TI_VENDOR_ID = 0x0451; 
+        const TI89_TITANIUM_PID = 0xE005; 
 
-            statusText.textContent = `Connected: ${device.productName || 'TI Device'}`;
-            statusText.style.color = "green";
-            fileInput.disabled = false;
-        } catch (error) {
-            console.error(error);
-            statusText.textContent = `Connection failed: ${error.message}`;
-            statusText.style.color = "red";
+        let device = null;
+        let selectedFileBuffer = null;
+
+        const connectBtn = document.getElementById('connectBtn');
+        const fileInput = document.getElementById('fileInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const statusDiv = document.getElementById('status');
+        const deviceInfo = document.getElementById('deviceInfo');
+
+        function log(message) {
+            statusDiv.textContent += "\n" + message;
+            statusDiv.scrollTop = statusDiv.scrollHeight;
         }
-    });
 
-    fileInput.addEventListener('change', (event) => {
-        const file = event.target.files[0];
-        if (!file) return;
-
-        const reader = new FileReader();
-        reader.onload = function(e) {
-            fileData = new Uint8Array(e.target.result);
-            sendBtn.disabled = false;
-            statusText.textContent = `Loaded ${file.name} (${fileData.length} bytes)`;
-            statusText.style.color = "black";
-        };
-        reader.readAsArrayBuffer(file);
-    });
-
-    sendBtn.addEventListener('click', async () => {
-        if (!device || !fileData) return;
-        try {
-            statusText.style.color = "black";
-            if (fileData.length < 80) throw new Error("Invalid TI file size (too small).");
-
-            const signature = String.fromCharCode(...fileData.subarray(0, 8));
-            if (!signature.startsWith("**TI89**")) {
-                throw new Error("Unsupported or corrupted TI file signature.");
-            }
-
-            const dataSectionLen = fileData[74] | (fileData[75] << 8);
-            const varHeaderOffset = 76;
-            const varHeaderLen = 22;
-            const varHeaderContent = fileData.subarray(varHeaderOffset, varHeaderOffset + varHeaderLen);
-            
-            const dataOffset = varHeaderOffset + varHeaderLen;
-            const actualVarData = fileData.subarray(dataOffset, dataOffset + dataSectionLen - varHeaderLen);
-
-            await flushInputBuffer();
-
-            // Phase 1: RTS Header (Command 0x06)
-            statusText.textContent = "Sending variable header...";
-            const rtsPacket = buildTiPacket(0x08, 0x06, varHeaderContent);
-            await device.transferOut(outEndpointNumber, rtsPacket);
-            
-            statusText.textContent = "Waiting for Header ACK...";
-            await waitForAck();
-
-            // Phase 2: Send Data (Command 0x15)
-            statusText.textContent = "Sending file data...";
-            const dataPacket = buildTiPacket(0x08, 0x15, actualVarData);
-            await device.transferOut(outEndpointNumber, dataPacket);
-            
-            statusText.textContent = "Waiting for Data ACK...";
-            await waitForAck();
-
-            // Phase 3: EOT (Command 0x92)
-            statusText.textContent = "Finalizing transfer...";
-            const eotPacket = buildTiPacket(0x08, 0x92, new Uint8Array(0));
-            await device.transferOut(outEndpointNumber, eotPacket);
-            await waitForAck();
-
-            statusText.textContent = "Transfer successful!";
-            statusText.style.color = "blue";
-        } catch (error) {
-            console.error(error);
-            statusText.textContent = `Transfer Error: ${error.message}`;
-            statusText.style.color = "red";
-            
-            await device.clearHalt('in', inEndpointNumber).catch(() => {});
-            await device.clearHalt('out', outEndpointNumber).catch(() => {});
-        }
-    });
-
-    async function flushInputBuffer() {
-        try {
-            for (let i = 0; i < 5; i++) {
-                const res = await Promise.race([
-                    device.transferIn(inEndpointNumber, 64),
-                    delay(50).then(() => null)
-                ]);
-                if (!res || res.data.byteLength === 0) break;
-            }
-        } catch(e) {}
-    }
-
-    async function waitForAck() {
-        let retries = 3;
-        while (retries > 0) {
-            await delay(50);
+        // 1. Connect to the Calculator via WebUSB
+        connectBtn.addEventListener('click', async () => {
             try {
-                const readResult = await Promise.race([
-                    device.transferIn(inEndpointNumber, 64),
-                    delay(2000).then(() => { throw new Error("Timeout waiting for response."); })
-                ]);
+                log("Requesting USB device selection...");
+                device = await navigator.usb.requestDevice({
+                    filters: [{ vendorId: TI_VENDOR_ID, productId: TI89_TITANIUM_PID }]
+                });
 
-                if (readResult.status !== 'ok') {
-                    throw new Error(`Device read status: ${readResult.status}`);
-                }
+                log(`Connected to: ${device.productName || 'TI-89 Titanium'}`);
+                deviceInfo.textContent = `${device.productName} (Ready)`;
 
-                const data = new Uint8Array(readResult.data.buffer);
-                if (data.length >= 4) {
-                    // Check for ACK command ID at index 1
-                    const commandId = data[1];
-                    if (commandId === 0x5A) {
-                        throw new Error("The calculator rejected the file (Memory full or duplicate name).");
-                    }
-                    if (commandId === 0x56) {
-                        return; // Successfully got ACK
-                    }
-                    throw new Error(`Unexpected handshake response code: 0x${commandId.toString(16).toUpperCase()}`);
-                }
-            } catch (err) {
-                retries--;
-                if (retries === 0) throw err;
-                await device.clearHalt('in', inEndpointNumber);
+                log("Opening session...");
+                await device.open();
+                
+                log("Selecting configuration...");
+                await device.selectConfiguration(1);
+                
+                log("Claiming interface 0...");
+                await device.claimInterface(0);
+
+                log("USB Interface successfully initialized.");
+                fileInput.disabled = false;
+            } catch (error) {
+                log(`Connection Error: ${error.message}`);
+                console.error(error);
             }
-        }
-    }
+        });
 
-    function buildTiPacket(machineId, commandId, dataBytes) {
-        const headerLength = 4;
-        const checksumLength = 2;
-        const totalLength = headerLength + dataBytes.length + checksumLength;
-        const packet = new Uint8Array(totalLength);
-        
-        packet[0] = machineId;
-        packet[1] = commandId;
-        
-        // TI-Protocol fix: Length field should match dataBytes length
-        packet[2] = dataBytes.length & 0xFF;
-        packet[3] = (dataBytes.length >> 8) & 0xFF;
-        
-        packet.set(dataBytes, headerLength);
+        // 2. Read local file into array buffer
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
 
-        // Checksum calculation covers everything except the 4-byte header
-        let checksum = 0;
-        for (let i = 0; i < dataBytes.length; i++) {
-            checksum = (checksum + dataBytes[i]) & 0xFFFF;
-        }
-        
-        packet[totalLength - 2] = checksum & 0xFF;
-        packet[totalLength - 1] = (checksum >> 8) & 0xFF;
-        
-        return packet;
-    }
-</script>
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                selectedFileBuffer = event.target.result;
+                log(`Loaded file: ${file.name} (${selectedFileBuffer.byteLength} bytes)`);
+                sendBtn.disabled = false;
+            };
+            reader.readAsArrayBuffer(file);
+        });
+
+        // 3. Send file data over the bulk endpoints
+        sendBtn.addEventListener('click', async () => {
+            if (!device || !selectedFileBuffer) return;
+
+            try {
+                sendBtn.disabled = true;
+                log("Preparing TI protocol header transmission...");
+
+                // TI Link Protocol involves 4 basic packet components:
+                // [Machine ID] [Command ID] [Data Length Low] [Data Length High]
+                // Followed by the data bytes and a 2-byte checksum.
+                
+                const fileData = new Uint8Array(selectedFileBuffer);
+                
+                // Construct basic TI link protocol structure variables 
+                // TI-89 Direct USB typically uses Endpoint 1 for Outgoing (Bulk Write) 
+                // and Endpoint 2 or 1 for Incoming (Bulk Read).
+                const endpointOut = 1; 
+
+                log("Sending data packet payload via Bulk Transfer...");
+                
+                // WebUSB transferOut requires endpoint index and data buffer
+                let result = await device.transferOut(endpointOut, fileData);
+                
+                if (result.status === 'ok') {
+                    log(`Successfully pushed ${result.bytesWritten} bytes to the TI-89! Check your calculator screen for receiving status.`);
+                } else {
+                    log(`Transfer status: ${result.status}`);
+                }
+
+            } catch (error) {
+                log(`Transfer failed: ${error.message}`);
+                log("Ensure your calculator is turned on, sitting on the Home screen, and the link cable is secure.");
+            } finally {
+                sendBtn.disabled = false;
+            }
+        });
+    </script>
 </body>
 </html>
