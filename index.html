@@ -9,31 +9,27 @@
         .container { max-width: 600px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
         button { background: #007bff; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; font-size: 16px; }
         button:hover { background: #0056b3; }
-        .status { margin-top: 20px; padding: 10px; border-left: 4px solid #007bff; background: #e9ecef; }
+        .status { margin-top: 20px; padding: 10px; border-left: 4px solid #007bff; background: #e9ecef; white-space: pre-line; }
         input[type="file"] { margin: 15px 0; display: block; }
     </style>
 </head>
 <body>
-
 <div class="container">
     <h2>TI-89 Titanium File Sender</h2>
     <p>Connect your TI-89 Titanium via USB, click "Connect", and select a file (.89i, .89t, .89z, etc.) to transmit.</p>
-    
     <button id="connectBtn">Connect Calculator</button>
     <input type="file" id="fileInput" disabled />
     <button id="sendBtn" disabled>Send File</button>
-
     <div class="status" id="statusLog">Status: Disconnected</div>
 </div>
 
 <script>
-// TI-89 Titanium USB Vendor ID (Texas Instruments)
 const TI_VENDOR_ID = 0x0451;
-
-// CORRECT PIDs for TI-89 Titanium (0x0e004 is standard, 0x0e00e is alternate/archive link)
-const TI_89_PIDS = [0xe004, 0xe00e]; 
-
+const TI_89_PIDS = [0xe004, 0xe00e];
 let usbDevice = null;
+let endpointOut = null;
+let endpointIn = null;
+
 const connectBtn = document.getElementById('connectBtn');
 const sendBtn = document.getElementById('sendBtn');
 const fileInput = document.getElementById('fileInput');
@@ -43,24 +39,30 @@ function log(message) {
     statusLog.textContent = `Status: ${message}`;
 }
 
-// 1. Request connection to the calculator
 connectBtn.addEventListener('click', async () => {
     try {
-        // Build filters for all potential TI-89 Titanium Product IDs
         const filters = TI_89_PIDS.map(pid => ({ vendorId: TI_VENDOR_ID, productId: pid }));
-        
         usbDevice = await navigator.usb.requestDevice({ filters: filters });
         await usbDevice.open();
 
-        // Select configuration #1 if not already active
         if (usbDevice.configuration === null) {
             await usbDevice.selectConfiguration(1);
         }
-
-        // Claim interface #0
         await usbDevice.claimInterface(0);
-        log(`Connected to ${usbDevice.productName || 'TI-89 Titanium'}`);
+
+        const activeInterface = usbDevice.configuration.interfaces.find(i => i.interfaceNumber === 0);
+        const alternate = activeInterface.alternates[0];
         
+        // Find both endpoints
+        const outEp = alternate.endpoints.find(e => e.direction === 'out');
+        const inEp = alternate.endpoints.find(e => e.direction === 'in');
+        
+        if (!outEp || !inEp) throw new Error("Endpoints missing.");
+        
+        endpointOut = outEp.endpointNumber;
+        endpointIn = inEp.endpointNumber;
+
+        log(`Connected to ${usbDevice.productName || 'TI-89 Titanium'}\nReady to send.`);
         fileInput.disabled = false;
         sendBtn.disabled = false;
     } catch (error) {
@@ -69,7 +71,6 @@ connectBtn.addEventListener('click', async () => {
     }
 });
 
-// 2. Read file and trigger transmission logic
 sendBtn.addEventListener('click', async () => {
     if (!usbDevice || !fileInput.files.length) {
         log("Please connect a device and select a file first.");
@@ -78,12 +79,10 @@ sendBtn.addEventListener('click', async () => {
     const file = fileInput.files[0];
     const reader = new FileReader();
     reader.onload = async (event) => {
-        const arrayBuffer = event.target.result;
-        const fileBytes = new Uint8Array(arrayBuffer);
-        log(`Preparing to send ${file.name} (${fileBytes.length} bytes)...`);
+        const fileBytes = new Uint8Array(event.target.result);
         try {
-            await sendTIFile(fileBytes);
-            log("File sent successfully!");
+            log(`Parsing file structure...`);
+            await transferTI89File(fileBytes);
         } catch (error) {
             console.error(error);
             log(`Transfer error: ${error.message}`);
@@ -92,32 +91,54 @@ sendBtn.addEventListener('click', async () => {
     reader.readAsArrayBuffer(file);
 });
 
-async function sendTIFile(bytes) {
-  // 1. Find the claimed interface (Interface 0) in the active configuration
-  const activeInterface = usbDevice.configuration.interfaces.find(i => i.interfaceNumber === 0);
-  
-  if (!activeInterface) {
-    throw new Error("Interface 0 not found in configuration.");
-  }
-
-  // 2. Dynamically search for the first 'out' (outbound) endpoint
-  const alternate = activeInterface.alternates[0];
-  const outEndpoint = alternate.endpoints.find(e => e.direction === 'out');
-
-  if (!outEndpoint) {
-    throw new Error("No outbound (OUT) endpoint found on Interface 0.");
-  }
-
-  const endpointOut = outEndpoint.endpointNumber;
-  log(`Sending packet header via Endpoint ${endpointOut}...`);
-
-  // 3. Perform the transfer using the dynamically discovered endpoint
-  const result = await usbDevice.transferOut(endpointOut, bytes);
-  if (result.status !== 'ok') {
-    throw new Error("USB transfer failed packet delivery.");
-  }
+// Helper to construct a TI-Link packet header wrapper
+function makePacket(cmd, dataBytes = new Uint8Array(0)) {
+    const len = dataBytes.length;
+    const packet = new Uint8Array(4 + len);
+    packet[0] = 0x08; // Machine ID for TI-89 / Titanium
+    packet[1] = cmd;  // Command ID (e.g., RTS, DATA, ACK)
+    packet[2] = len & 0xFF;         // Length LSB
+    packet[3] = (len >> 8) & 0xFF;  // Length MSB
+    packet.set(dataBytes, 4);
+    return packet;
 }
 
+async function transferTI89File(rawFileBytes) {
+    // A valid TI file (.89x etc) contains a header signature. 
+    // The actual variable content metadata (RTS payload) starts at index 0x4A in standard TI files.
+    if (rawFileBytes.length < 0x5A) {
+        throw new Error("Invalid or corrupt TI file layout.");
+    }
+
+    // Extract the variable metadata block for the Request To Send (RTS) step
+    // Typically 0x0A to 0x10 bytes long depending on variable name length
+    const rtsPayload = rawFileBytes.slice(0x4A, 0x5A); 
+
+    // Extract actual contents payload + checksum from the file back-end
+    const dataPayload = rawFileBytes.slice(0x5A);
+
+    log("Sending Request to Send (RTS)...");
+    const rtsPacket = makePacket(0x06, rtsPayload); // 0x06 = RTS command
+    await usbDevice.transferOut(endpointOut, rtsPacket);
+
+    log("Waiting for Clear To Send (CTS) from calculator...");
+    let response = await usbDevice.transferIn(endpointIn, 64);
+    if (response.status !== 'ok' || response.data.getUint8(1) !== 0x09) { // 0x09 = CTS
+        throw new Error("Calculator rejected or timed out the handshake Request.");
+    }
+
+    log("Sending variable data payloads...");
+    const dataPacket = makePacket(0x15, dataPayload); // 0x15 = DATA command
+    await usbDevice.transferOut(endpointOut, dataPacket);
+
+    log("Waiting for final acknowledgment...");
+    response = await usbDevice.transferIn(endpointIn, 64);
+    if (response.status === 'ok' && response.data.getUint8(1) === 0x92) { // 0x92 = EOT / ACK
+        log("File sent and successfully accepted by TI-89 Titanium!");
+    } else {
+        log("Data packet transmitted, but calculator did not send confirmation acknowledgement.");
+    }
+}
 </script>
 </body>
 </html>
