@@ -131,48 +131,62 @@ async function transferTI89File(rawFileBytes) {
         throw new Error("Invalid or corrupt TI file layout length.");
     }
 
-    // Dynamic layout calculations based on standard TI-8x file headers
     const dataLenLSB = rawFileBytes[0x44];
     const dataLenMSB = rawFileBytes[0x45];
     const variableDataLength = dataLenLSB | (dataLenMSB << 8);
 
-    // RTS block sits exactly between file info comments and the actual data body
     const rtsPayload = rawFileBytes.slice(0x4A, 0x5A);
     const dataPayload = rawFileBytes.slice(0x5A, 0x5A + variableDataLength);
 
+    // 1. Send Request to Send (RTS)
     log("Sending Request to Send (RTS)...");
     const rtsPacket = makeUSBDirectPacket(0x06, rtsPayload);
     await usbDevice.transferOut(endpointOut, rtsPacket);
 
-    log("Waiting for Clear To Send (CTS) from calculator...");
+    // 2. Read the calculator's immediate ACK to our RTS
+    log("Waiting for Link ACK...");
     let response = await usbDevice.transferIn(endpointIn, 64);
-    
-    // Offset validation due to USB Direct Framing wrappers wrapped back from calculators
     let dataView = response.data;
     if (response.status !== 'ok' || dataView.byteLength < 6) {
-        throw new Error("Device sent an empty or fragmented response.");
+        throw new Error("Device timed out or sent an empty Link ACK response.");
     }
     
-    // Byte index 5 corresponds to standard inner command ID location
-    let responseCmd = dataView.getUint8(5); 
-    if (responseCmd !== 0x09) { 
+    let responseCmd = dataView.getUint8(5);
+    if (responseCmd !== 0x56) { // 0x56 is ACK
+        throw new Error(`Expected Link ACK (0x56), got: 0x${responseCmd.toString(16)}`);
+    }
+
+    // 3. Read the Clear To Send (CTS) packet
+    log("Waiting for Clear To Send (CTS)...");
+    response = await usbDevice.transferIn(endpointIn, 64);
+    dataView = response.data;
+    responseCmd = dataView.getUint8(5);
+    
+    if (responseCmd !== 0x09) { // 0x09 is CTS
         throw new Error(`Calculator rejected. Expected CTS (0x09), got: 0x${responseCmd.toString(16)}`);
     }
 
+    // 4. Send our ACK back to the calculator to tell it we received its CTS
+    log("Acknowledging CTS...");
+    const ackPacket = makeUSBDirectPacket(0x56, new Uint8Array(0));
+    await usbDevice.transferOut(endpointOut, ackPacket);
+
+    // 5. Send actual data payload
     log("Sending variable data payloads...");
     const dataPacket = makeUSBDirectPacket(0x15, dataPayload);
     await usbDevice.transferOut(endpointOut, dataPacket);
 
-    log("Waiting for final acknowledgment...");
+    // 6. Read calculator's ACK for the data payload
+    log("Waiting for data acknowledgment...");
     response = await usbDevice.transferIn(endpointIn, 64);
     dataView = response.data;
-    
-    if (response.status === 'ok' && dataView.getUint8(5) === 0x92) {
+    if (response.status === 'ok' && dataView.getUint8(5) === 0x56) {
         log("File sent and successfully accepted by TI-89 Titanium!");
     } else {
         log(`Data transmitted, but alternative status flag returned: 0x${dataView.getUint8(5).toString(16)}`);
     }
 }
+
 </script>
 </body>
 </html>
