@@ -16,7 +16,7 @@
 <body>
 <div class="container">
     <h2>TI-89 Titanium File Sender</h2>
-    <p>Connect your TI-89 Titanium via USB, click "Connect", and select a file (.89i, .89t, .89z, etc.) to transmit.</p>
+    <p>Connect your TI-89 Titanium via USB, click "Connect", and select a file to transmit.</p>
     <button id="connectBtn">Connect Calculator</button>
     <input type="file" id="fileInput" disabled />
     <button id="sendBtn" disabled>Send File</button>
@@ -44,7 +44,6 @@ connectBtn.addEventListener('click', async () => {
         const filters = TI_89_PIDS.map(pid => ({ vendorId: TI_VENDOR_ID, productId: pid }));
         usbDevice = await navigator.usb.requestDevice({ filters: filters });
         await usbDevice.open();
-
         if (usbDevice.configuration === null) {
             await usbDevice.selectConfiguration(1);
         }
@@ -52,13 +51,11 @@ connectBtn.addEventListener('click', async () => {
 
         const activeInterface = usbDevice.configuration.interfaces.find(i => i.interfaceNumber === 0);
         const alternate = activeInterface.alternates[0];
-        
-        // Find both endpoints
+
         const outEp = alternate.endpoints.find(e => e.direction === 'out');
         const inEp = alternate.endpoints.find(e => e.direction === 'in');
-        
         if (!outEp || !inEp) throw new Error("Endpoints missing.");
-        
+
         endpointOut = outEp.endpointNumber;
         endpointIn = inEp.endpointNumber;
 
@@ -91,52 +88,85 @@ sendBtn.addEventListener('click', async () => {
     reader.readAsArrayBuffer(file);
 });
 
-// Helper to construct a TI-Link packet header wrapper
-function makePacket(cmd, dataBytes = new Uint8Array(0)) {
-    const len = dataBytes.length;
-    const packet = new Uint8Array(4 + len);
-    packet[0] = 0x08; // Machine ID for TI-89 / Titanium
-    packet[1] = cmd;  // Command ID (e.g., RTS, DATA, ACK)
-    packet[2] = len & 0xFF;         // Length LSB
-    packet[3] = (len >> 8) & 0xFF;  // Length MSB
-    packet.set(dataBytes, 4);
+// Creates a properly framed USB direct packet for hardware endpoints
+function makeUSBDirectPacket(cmd, dataBytes = new Uint8Array(0)) {
+    const payloadLen = dataBytes.length;
+    // Protocol demands a 4-byte link header + data + 2-byte checksum
+    const linkPacketLen = 4 + payloadLen + 2; 
+
+    const packet = new Uint8Array(4 + linkPacketLen);
+    
+    // 1. USB Link Layer Wrapper Header
+    packet[0] = 0x21; // Direct USB command prefix
+    packet[1] = 0x01; // Data transfer flag
+    packet[2] = linkPacketLen & 0xFF;
+    packet[3] = (linkPacketLen >> 8) & 0xFF;
+
+    // 2. Calculator Standard Packet Frame
+    packet[4] = 0x08; // Machine ID: TI-89 Titanium
+    packet[5] = cmd;  // Command ID (0x06=RTS, 0x15=DATA, 0x56=ACK)
+    packet[6] = payloadLen & 0xFF;
+    packet[7] = (payloadLen >> 8) & 0xFF;
+
+    // 3. Set the variables payload
+    packet.set(dataBytes, 8);
+
+    // 4. Compute 16-bit lower-checksum of the payload data
+    let checksum = 0;
+    for (let i = 0; i < payloadLen; i++) {
+        checksum = (checksum + dataBytes[i]) & 0xFFFF;
+    }
+    packet[8 + payloadLen] = checksum & 0xFF;
+    packet[9 + payloadLen] = (checksum >> 8) & 0xFFFF;
+
     return packet;
 }
 
 async function transferTI89File(rawFileBytes) {
-    // A valid TI file (.89x etc) contains a header signature. 
-    // The actual variable content metadata (RTS payload) starts at index 0x4A in standard TI files.
     if (rawFileBytes.length < 0x5A) {
-        throw new Error("Invalid or corrupt TI file layout.");
+        throw new Error("Invalid or corrupt TI file layout length.");
     }
 
-    // Extract the variable metadata block for the Request To Send (RTS) step
-    // Typically 0x0A to 0x10 bytes long depending on variable name length
-    const rtsPayload = rawFileBytes.slice(0x4A, 0x5A); 
+    // Dynamic layout calculations based on standard TI-8x file headers
+    const dataLenLSB = rawFileBytes[0x44];
+    const dataLenMSB = rawFileBytes[0x45];
+    const variableDataLength = dataLenLSB | (dataLenMSB << 8);
 
-    // Extract actual contents payload + checksum from the file back-end
-    const dataPayload = rawFileBytes.slice(0x5A);
+    // RTS block sits exactly between file info comments and the actual data body
+    const rtsPayload = rawFileBytes.slice(0x4A, 0x5A);
+    const dataPayload = rawFileBytes.slice(0x5A, 0x5A + variableDataLength);
 
     log("Sending Request to Send (RTS)...");
-    const rtsPacket = makePacket(0x06, rtsPayload); // 0x06 = RTS command
+    const rtsPacket = makeUSBDirectPacket(0x06, rtsPayload);
     await usbDevice.transferOut(endpointOut, rtsPacket);
 
     log("Waiting for Clear To Send (CTS) from calculator...");
     let response = await usbDevice.transferIn(endpointIn, 64);
-    if (response.status !== 'ok' || response.data.getUint8(1) !== 0x09) { // 0x09 = CTS
-        throw new Error("Calculator rejected or timed out the handshake Request.");
+    
+    // Offset validation due to USB Direct Framing wrappers wrapped back from calculators
+    let dataView = response.data;
+    if (response.status !== 'ok' || dataView.byteLength < 6) {
+        throw new Error("Device sent an empty or fragmented response.");
+    }
+    
+    // Byte index 5 corresponds to standard inner command ID location
+    let responseCmd = dataView.getUint8(5); 
+    if (responseCmd !== 0x09) { 
+        throw new Error(`Calculator rejected. Expected CTS (0x09), got: 0x${responseCmd.toString(16)}`);
     }
 
     log("Sending variable data payloads...");
-    const dataPacket = makePacket(0x15, dataPayload); // 0x15 = DATA command
+    const dataPacket = makeUSBDirectPacket(0x15, dataPayload);
     await usbDevice.transferOut(endpointOut, dataPacket);
 
     log("Waiting for final acknowledgment...");
     response = await usbDevice.transferIn(endpointIn, 64);
-    if (response.status === 'ok' && response.data.getUint8(1) === 0x92) { // 0x92 = EOT / ACK
+    dataView = response.data;
+    
+    if (response.status === 'ok' && dataView.getUint8(5) === 0x92) {
         log("File sent and successfully accepted by TI-89 Titanium!");
     } else {
-        log("Data packet transmitted, but calculator did not send confirmation acknowledgement.");
+        log(`Data transmitted, but alternative status flag returned: 0x${dataView.getUint8(5).toString(16)}`);
     }
 }
 </script>
