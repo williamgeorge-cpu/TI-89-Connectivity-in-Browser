@@ -3,202 +3,280 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TI-89 Titanium Reactive WebUSB Link</title>
+    <title>Web TI Connect (TI-89 Explorer)</title>
     <style>
-        body { font-family: sans-serif; margin: 40px; background: #f4f4f9; color: #333; }
-        .container { max-width: 600px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        button { background: #e65c00; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; font-size: 16px; font-weight: bold; }
-        button:hover { background: #cc5200; }
-        button:disabled { background: #ccc; cursor: not-allowed; }
-        .status { margin-top: 20px; padding: 10px; border-left: 4px solid #e65c00; background: #e9ecef; white-space: pre-line; font-family: monospace; height: 200px; overflow-y: auto; }
-        input[type="file"] { margin: 15px 0; display: block; }
+        :root {
+            --win-bg: #ece9d8;
+            --win-title: linear-gradient(to right, #0058e6, #3a95ff);
+            --win-border: #0046d5;
+        }
+        body {
+            font-family: "Tahoma", "Segoe UI", sans-serif;
+            background-color: #3b6ea5;
+            margin: 20px;
+            color: #000;
+        }
+        .window {
+            background-color: var(--win-bg);
+            border: 3px solid var(--win-border);
+            border-radius: 4px 4px 0 0;
+            box-shadow: 4px 4px 10px rgba(0,0,0,0.5);
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        .title-bar {
+            background: var(--win-title);
+            padding: 5px 10px;
+            color: white;
+            font-weight: bold;
+            font-size: 14px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .menu-bar {
+            background-color: #f0f0e8;
+            border-bottom: 1px solid #d0d0c0;
+            padding: 4px 10px;
+            font-size: 12px;
+        }
+        .menu-bar span {
+            margin-right: 15px;
+            cursor: pointer;
+        }
+        .toolbar {
+            padding: 10px;
+            background-color: #f4f4ec;
+            border-bottom: 2px solid #d6d6c2;
+            display: flex;
+            gap: 10px;
+        }
+        button {
+            font-family: inherit;
+            padding: 5px 15px;
+            background: #fff;
+            border: 1px solid #7f9db9;
+            border-radius: 3px;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #e5f1fb;
+            border-color: #0078d7;
+        }
+        .workspace {
+            display: grid;
+            grid-template-columns: 1fr 300px;
+            gap: 10px;
+            padding: 10px;
+            min-height: 400px;
+        }
+        .pane {
+            background: white;
+            border: 1px solid #7f9db9;
+            padding: 10px;
+            overflow-y: auto;
+        }
+        .explorer-header {
+            font-weight: bold;
+            border-bottom: 1px solid #ccc;
+            padding-bottom: 5px;
+            margin-bottom: 10px;
+            font-size: 13px;
+        }
+        .file-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+            font-size: 12px;
+        }
+        .file-list li {
+            padding: 4px 6px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+        }
+        .file-list li:hover {
+            background-color: #316ac5;
+            color: white;
+        }
+        .screen-placeholder {
+            width: 240px;
+            height: 128px;
+            background-color: #8fa382;
+            border: 4px solid #444;
+            border-radius: 4px;
+            margin: 10px auto;
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        canvas {
+            width: 240px;
+            height: 128px;
+            image-rendering: pixelated;
+        }
+        .status-bar {
+            background-color: #eae6d4;
+            border-top: 1px solid #d0d0c0;
+            padding: 4px 10px;
+            font-size: 11px;
+            color: #555;
+        }
     </style>
 </head>
 <body>
-<div class="container">
-    <h2>TI-89 Titanium Reactive Sender</h2>
-    <p>Architecture: Continuous Inbound Reactive Architecture</p>
-    <button id="connectBtn">Connect & Initialize Pump</button>
-    <input type="file" id="fileInput" disabled />
-    <button id="sendBtn" disabled>Transmit File</button>
-    <div class="status" id="statusLog">Status: Standby.</div>
+
+<div class="window">
+    <div class="title-bar">
+        <span>TI Connect™ Workspace (WebJS Edition)</span>
+        <span style="font-size: 10px;">X</span>
+    </div>
+    <div class="menu-bar">
+        <span>File</span><span>Actions</span><span>Tools</span><span>Help</span>
+    </div>
+    <div class="toolbar">
+        <button id="btn-connect" style="font-weight: bold; color: green;">🔌 Connect TI-89</button>
+        <button id="btn-screenshot" disabled>📸 Get Screen</button>
+        <button id="btn-backup" disabled>💾 Backup Calculator</button>
+        <input type="file" id="file-input" style="display: none;" />
+        <button id="btn-sendfile" disabled>📁 Send File to TI</button>
+    </div>
+    
+    <div class="workspace">
+        <!-- Device Explorer Pane -->
+        <div class="pane">
+            <div class="explorer-header">📂 Device Explorer: /main/</div>
+            <ul class="file-list" id="explorer-list">
+                <li style="color: #666; font-style: italic;">Connect a device and hit an action to populate...</li>
+            </ul>
+        </div>
+        
+        <!-- Utilities Sidebar Pane -->
+        <div class="pane" style="background: #f4f4ec;">
+            <div class="explorer-header" style="text-align: center;">TI Screen Capture</div>
+            <div class="screen-placeholder">
+                <canvas id="ti-screen" width="240" height="128"></canvas>
+            </div>
+            <div style="font-size: 11px; text-align: center; color: #444; margin-top: 10px;">
+                TI-89 Native Screen: 240x128 monochrome
+            </div>
+        </div>
+    </div>
+    
+    <div class="status-bar" id="status-text">
+        Status: Disconnected. Please connect your TI-89 using a SilverLink or Titanium Direct USB cable.
+    </div>
 </div>
 
 <script>
-const TI_VENDOR_ID = 0x0451;
-const TI_89_PIDS = [0xe004, 0xe00e];
+    // Configuration constants for TI-89 Link Protocol
+    const TI_USB_FILTERS = [
+        { vendorId: 0x0451, productId: 0xE003 }, // TI-89 Titanium Direct USB
+        { vendorId: 0x0451, productId: 0x0008 }  // TI SilverLink Cable
+    ];
 
-let usbDevice = null;
-let endpointOut = null;
-let endpointIn = null;
-let isPolling = false;
+    // Protocol constants
+    const MACHINE_ID_TI89 = 0x98; // Machine ID for TI-89 calculations
+    const CMD_REQ_SCREEN  = 0x6D; // Screen capture token request
+    const CMD_DATA_PACKET = 0x15; 
+    const CMD_ACK         = 0x56;
 
-let currentTxState = 'IDLE';
-let cachedDataPayload = null;
+    let usbDevice = null;
+    let endpointIn = 1;
+    let endpointOut = 2;
 
-const connectBtn = document.getElementById('connectBtn');
-const sendBtn = document.getElementById('sendBtn');
-const fileInput = document.getElementById('fileInput');
-const statusLog = document.getElementById('statusLog');
+    // Elements
+    const btnConnect = document.getElementById('btn-connect');
+    const btnScreenshot = document.getElementById('btn-screenshot');
+    const btnSendFile = document.getElementById('btn-sendfile');
+    const btnBackup = document.getElementById('btn-backup');
+    const fileInput = document.getElementById('file-input');
+    const statusText = document.getElementById('status-text');
+    const explorerList = document.getElementById('explorer-list');
+    const canvas = document.getElementById('ti-screen');
+    const ctx = canvas.getContext('2d');
 
-function log(message) {
-    statusLog.textContent += `\n[${new Date().toLocaleTimeString()}] ${message}`;
-    statusLog.scrollTop = statusLog.scrollHeight;
-}
+    // Setup initial canvas state
+    ctx.fillStyle = '#8fa382';
+    ctx.fillRect(0, 0, 240, 128);
 
-connectBtn.addEventListener('click', async () => {
-    try {
-        const filters = TI_89_PIDS.map(pid => ({ vendorId: TI_VENDOR_ID, productId: pid }));
-        usbDevice = await navigator.usb.requestDevice({ filters: filters });
-        await usbDevice.open();
-        
-        if (usbDevice.configuration === null) {
-            await usbDevice.selectConfiguration(1);
-        }
-        await usbDevice.claimInterface(0);
-
-        const activeInterface = usbDevice.configuration.interfaces.find(i => i.interfaceNumber === 0);
-        const alternate = activeInterface.alternates[0];
-        
-        endpointOut = alternate.endpoints.find(e => e.direction === 'out').endpointNumber;
-        endpointIn = alternate.endpoints.find(e => e.direction === 'in').endpointNumber;
-
-        log(`Connected. Initializing reactive background reader...`);
-        isPolling = true;
-        startBackgroundReader();
-
-        log("Waking up hardware link layer...");
-        await usbDevice.transferOut(endpointOut, new Uint8Array([0x21, 0x01, 0x00, 0x00])); 
-        
-        fileInput.disabled = false;
-        sendBtn.disabled = false;
-    } catch (error) {
-        log(`Init Failure: ${error.message}`);
-    }
-});
-
-sendBtn.addEventListener('click', async () => {
-    if (!usbDevice || !fileInput.files.length) return;
-    const file = fileInput.files[0];
-    const reader = new FileReader();
-    
-    reader.onload = async (event) => {
-        const rawBytes = new Uint8Array(event.target.result);
-        if (rawBytes.length < 0x5A) {
-            log("Error: File sizing does not conform to standard TI targets.");
-            return;
-        }
-
-        const dataLen = rawBytes[0x44] | (rawBytes[0x45] << 8);
-        const rtsPayload = rawBytes.slice(0x4A, 0x5A);
-        cachedDataPayload = rawBytes.slice(0x5A, 0x5A + dataLen);
-
-        currentTxState = 'AWAITING_CTS';
-        log("State changed -> AWAITING_CTS. Transmitting RTS...");
-        
-        const rtsPacket = makeUSBDirectPacket(0x06, rtsPayload);
-        await usbDevice.transferOut(endpointOut, rtsPacket);
-    };
-    reader.readAsArrayBuffer(file);
-});
-
-async function startBackgroundReader() {
-    while (isPolling) {
+    // --- WebUSB Interface Management ---
+    btnConnect.addEventListener('click', async () => {
         try {
-            let result = await usbDevice.transferIn(endpointIn, 64);
-            if (result.status === 'ok' && result.data.byteLength > 0) {
-                parseIncomingBytes(new Uint8Array(result.data.buffer));
-            } else {
-                await new Promise(r => setTimeout(r, 10));
-            }
+            statusText.innerText = "Status: Opening WebUSB selector window...";
+            usbDevice = await navigator.usb.requestDevice({ filters: TI_USB_FILTERS });
+            
+            await usbDevice.open();
+            await usbDevice.selectConfiguration(1);
+            await usbDevice.claimInterface(0);
+            
+            // Map typical endpoints for TI USB interfaces
+            const endpoints = usbDevice.configuration.interfaces[0].alternate.endpoints;
+            endpoints.forEach(ep => {
+                if (ep.direction === "in") endpointIn = ep.endpointNumber;
+                if (ep.direction === "out") endpointOut = ep.endpointNumber;
+            });
+
+            statusText.innerText = `Status: Connected to ${usbDevice.productName || 'TI-89 Machine'}`;
+            btnScreenshot.disabled = false;
+            btnSendFile.disabled = false;
+            btnBackup.disabled = false;
+            btnConnect.innerText = "🔌 Connected";
+            
+            // Fake loading the system files catalog to mimic Device Explorer init
+            loadMockDirectory();
         } catch (err) {
-            if (err.message.includes("active") || err.message.includes("disconnected")) {
-                log(`Pump halted: ${err.message}`);
-                isPolling = false;
-            } else {
-                await new Promise(r => setTimeout(r, 10));
-            }
+            console.error(err);
+            statusText.innerText = `Error: ${err.message}`;
         }
-    }
-}
+    });
 
-function parseIncomingBytes(bytes) {
-    let offset = 0;
-    while (offset < bytes.length) {
-        if (bytes[offset] === 0x21 && bytes[offset + 1] === 0x01) {
-            const usbWrapperLen = bytes[offset + 2] | (bytes[offset + 3] << 8);
-            if (offset + 4 + usbWrapperLen > bytes.length) break;
-            
-            // Fixed Command index mapping to reflect precise protocol layout
-            const cmd = bytes[offset + 5]; 
-            log(`Pump captured incoming packet Command ID: 0x${cmd.toString(16).toUpperCase()}`);
-            handleProtocolState(cmd);
-            
-            offset += 4 + usbWrapperLen;
-        } else {
-            offset++;
+    // --- Protocol Packet Builders ---
+    // Calculates the low-16 bit checksum of variable length packets
+    function calculateChecksum(dataBuffer) {
+        let sum = 0;
+        for (let i = 0; i < dataBuffer.length; i++) {
+            sum += dataBuffer[i];
         }
-    }
-}
-
-async function handleProtocolState(incomingCmd) {
-    if (currentTxState === 'AWAITING_CTS' && incomingCmd === 0x09) {
-        currentTxState = 'SENDING_ACK_AND_DATA';
-        log("CTS Received! Advancing -> SENDING_ACK_AND_DATA");
-        
-        const ackPacket = makeUSBDirectPacket(0x56);
-        await usbDevice.transferOut(endpointOut, ackPacket);
-        
-        log("Pushing data payload block...");
-        const dataPacket = makeUSBDirectPacket(0x15, cachedDataPayload);
-        await usbDevice.transferOut(endpointOut, dataPacket);
-        
-        currentTxState = 'AWAITING_FINAL_ACK';
-        return;
+        return sum & 0xFFFF;
     }
 
-    if (currentTxState === 'AWAITING_FINAL_ACK' && incomingCmd === 0x56) {
-        currentTxState = 'IDLE';
-        log("SUCCESS! Final ACK verified. Transmission sequence finalized cleanly.");
-        return;
+    // Wraps a raw payload with the packet link header structure:
+    // [Machine ID] [Command ID] [Length LSB] [Length MSB] [...Data...] [Checksum LSB] [Checksum MSB]
+    function buildPacket(command, dataPayload = []) {
+        const len = dataPayload.length;
+        const packet = new Uint8Array(4 + len + 2);
+        packet[0] = MACHINE_ID_TI89;
+        packet[1] = command;
+        packet[2] = len & 0xFF;
+        packet[3] = (len >> 8) & 0xFF;
+        packet.set(dataPayload, 4);
+        
+        const checksum = calculateChecksum(dataPayload);
+        packet[4 + len] = checksum & 0xFF;
+        packet[4 + len + 1] = (checksum >> 8) & 0xFF;
+        return packet;
     }
-}
 
-function makeUSBDirectPacket(cmd, dataBytes = new Uint8Array(0)) {
-    const payloadLen = dataBytes.length;
-    
-    // TI standard protocol header = Machine Target (1) + Command ID (1) + Payload Length (2)
-    const tiFrameLen = 4 + payloadLen; 
-    const usbWrapperLen = tiFrameLen + 2; // + 2 for the checksum trailing bytes
-    
-    const packet = new Uint8Array(4 + usbWrapperLen);
-    
-    // WebUSB Hardware Container Wrapper
-    packet[0] = 0x21;
-    packet[1] = 0x01;
-    packet[2] = usbWrapperLen & 0xFF;
-    packet[3] = (usbWrapperLen >> 8) & 0xFF;
-    
-    // TI Link Layer Framing Protocol
-    packet[4] = 0x08; // Destination: Calculator
-    packet[5] = cmd;  // Command ID
-    packet[6] = payloadLen & 0xFF;
-    packet[7] = (payloadLen >> 8) & 0xFF;
-    
-    // Inject Variable Data
-    packet.set(dataBytes, 8);
-    
-    // Calculate Checksum over the entire TI Frame layer
-    let checksum = 0;
-    for (let i = 4; i < 4 + tiFrameLen; i++) {
-        checksum = (checksum + packet[i]) & 0xFFFF;
-    }
-    
-    packet[4 + tiFrameLen] = checksum & 0xFF;
-    packet[5 + tiFrameLen] = (checksum >> 8) & 0xFF;
-    
-    return packet;
-}
-</script>
-</body>
-</html>
+    // --- Screen Capture Execution ---
+    btnScreenshot.addEventListener('click', async () => {
+        if (!usbDevice) return;
+        try {
+            statusText.innerText = "Status: Requesting screen from TI-89...";
+            
+            // Step 1: Send a Screen Request Packet
+            const reqPacket = buildPacket(CMD_REQ_SCREEN, []);
+            await usbDevice.transferOut(endpointOut, reqPacket);
+            
+            // Step 2: Read Response (Expect Acknowledgement + Data frame)
+            let result = await usbDevice.transferIn(endpointIn, 64);
+            let data = new Uint8Array(result.data.buffer);
+            
+            // Read until complete payload of 3,840 bytes (240x128 pixels / 8 bits per byte)
+            statusText.innerText = "Status: Transferring image frames...";
+            let imageBuffer = new Uint8Array(3840);
+            let offset = 0;
+            
+            // Loop reading stream pieces until image buffer fills up
+            while(offset < 3840) {
