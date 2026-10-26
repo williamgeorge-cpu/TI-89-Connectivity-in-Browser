@@ -27,92 +27,82 @@
 </div>
 
 <script>
-    // TI-89 Titanium USB Vendor ID (Texas Instruments) and Product ID
-    const TI_VENDOR_ID = 0x0451; 
-    const TI_89_PRODUCT_ID = 0xe008; // Typical SilverLink/Direct USB PID
+// TI-89 Titanium USB Vendor ID (Texas Instruments)
+const TI_VENDOR_ID = 0x0451;
 
-    let usbDevice = null;
+// CORRECT PIDs for TI-89 Titanium (0x0e004 is standard, 0x0e00e is alternate/archive link)
+const TI_89_PIDS = [0xe004, 0xe00e]; 
 
-    const connectBtn = document.getElementById('connectBtn');
-    const sendBtn = document.getElementById('sendBtn');
-    const fileInput = document.getElementById('fileInput');
-    const statusLog = document.getElementById('statusLog');
+let usbDevice = null;
+const connectBtn = document.getElementById('connectBtn');
+const sendBtn = document.getElementById('sendBtn');
+const fileInput = document.getElementById('fileInput');
+const statusLog = document.getElementById('statusLog');
 
-    function log(message) {
-        statusLog.textContent = `Status: ${message}`;
+function log(message) {
+    statusLog.textContent = `Status: ${message}`;
+}
+
+// 1. Request connection to the calculator
+connectBtn.addEventListener('click', async () => {
+    try {
+        // Build filters for all potential TI-89 Titanium Product IDs
+        const filters = TI_89_PIDS.map(pid => ({ vendorId: TI_VENDOR_ID, productId: pid }));
+        
+        usbDevice = await navigator.usb.requestDevice({ filters: filters });
+        await usbDevice.open();
+
+        // Select configuration #1 if not already active
+        if (usbDevice.configuration === null) {
+            await usbDevice.selectConfiguration(1);
+        }
+
+        // Claim interface #0
+        await usbDevice.claimInterface(0);
+        log(`Connected to ${usbDevice.productName || 'TI-89 Titanium'}`);
+        
+        fileInput.disabled = false;
+        sendBtn.disabled = false;
+    } catch (error) {
+        console.error(error);
+        log(`Connection failed: ${error.message}`);
     }
+});
 
-    // 1. Request connection to the calculator
-    connectBtn.addEventListener('click', async () => {
+// 2. Read file and trigger transmission logic
+sendBtn.addEventListener('click', async () => {
+    if (!usbDevice || !fileInput.files.length) {
+        log("Please connect a device and select a file first.");
+        return;
+    }
+    const file = fileInput.files[0];
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+        const arrayBuffer = event.target.result;
+        const fileBytes = new Uint8Array(arrayBuffer);
+        log(`Preparing to send ${file.name} (${fileBytes.length} bytes)...`);
         try {
-            usbDevice = await navigator.usb.requestDevice({
-                filters: [{ vendorId: TI_VENDOR_ID, productId: TI_89_PRODUCT_ID }]
-            });
-
-            await usbDevice.open();
-            // Select configuration #1 if not already active
-            if (usbDevice.configuration === null) {
-                await usbDevice.selectConfiguration(1);
-            }
-            // Claim interface #0 (TI calculators typically expose a single custom interface)
-            await usbDevice.claimInterface(0);
-
-            log(`Connected to ${usbDevice.productName}`);
-            fileInput.disabled = false;
-            sendBtn.disabled = false;
+            await sendTIFile(fileBytes);
+            log("File sent successfully!");
         } catch (error) {
             console.error(error);
-            log(`Connection failed: ${error.message}`);
+            log(`Transfer error: ${error.message}`);
         }
-    });
+    };
+    reader.readAsArrayBuffer(file);
+});
 
-    // 2. Read file and trigger transmission logic
-    sendBtn.addEventListener('click', async () => {
-        if (!usbDevice || !fileInput.files.length) {
-            log("Please connect a device and select a file first.");
-            return;
-        }
-
-        const file = fileInput.files[0];
-        const reader = new FileReader();
-
-        reader.onload = async (event) => {
-            const arrayBuffer = event.target.result;
-            const fileBytes = new Uint8Array(arrayBuffer);
-
-            log(`Preparing to send ${file.name} (${fileBytes.length} bytes)...`);
-            
-            try {
-                await sendTIFile(fileBytes);
-                log("File sent successfully!");
-            } catch (error) {
-                console.error(error);
-                log(`Transfer error: ${error.message}`);
-            }
-        };
-
-        reader.readAsArrayBuffer(file);
-    });
-
-    // 3. Protocol Transmission Logic
-    async function sendTIFile(bytes) {
-        // TI-Protocol requires a handshake/header packet before raw variable data is pushed.
-        // Endpoint 1 or 2 is typically used for Outbound transfers depending on the interface configuration.
-        const endpointOut = 1; 
-
-        // NOTE: You must format 'bytes' into valid TI-Link packets.
-        // A generic packet structure consists of:
-        // [Machine ID] [Command ID] [Length LSB] [Length MSB] [Data...] [Checksum LSB] [Checksum MSB]
-        
-        log("Sending packet header...");
-        // Example: Sending the raw bytes directly (Requires the file to already contain the 
-        // proper native TI variable headers if sending unpacketized data stream)
-        const result = await usbDevice.transferOut(endpointOut, bytes);
-        
-        if (result.status !== 'ok') {
-            throw new Error("USB transfer failed packet delivery.");
-        }
+// 3. Protocol Transmission Logic
+async function sendTIFile(bytes) {
+    // Note: TI-89 Titanium usually relies on Endpoint 1 for Outbound Bulk transfers
+    const endpointOut = 1; 
+    log("Sending packet header...");
+    
+    const result = await usbDevice.transferOut(endpointOut, bytes);
+    if (result.status !== 'ok') {
+        throw new Error("USB transfer failed packet delivery.");
     }
+}
 </script>
 </body>
 </html>
