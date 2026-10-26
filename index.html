@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TI-89 WebUSB File Transfer</title>
+    <style>
+        body { font-family: sans-serif; margin: 30px; line-height: 1.6; }
+        .container { max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #ccc; border-radius: 8px; }
+        button { display: block; width: 100%; padding: 10px; margin: 10px 0; font-size: 16px; cursor: pointer; }
+        #status { font-weight: bold; color: #555; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>TI-89 Link Utility</h2>
+    <p>Status: <span id="status">Disconnected</span></p>
+    
+    <button id="connectBtn">Connect to TI-89</button>
+    
+    <hr>
+    
+    <label for="fileInput">Select TI-89 File (.89g, .89z, etc.):</label>
+    <input type="file" id="fileInput" disabled>
+    
+    <button id="sendBtn" disabled>Send File to Calculator</button>
+</div>
+
+<script>
+    // TI Vendor ID and potential Product IDs for Direct USB or SilverLink cables
+    const TI_VENDOR_ID = 0x0451; 
+    const TI_89_PRODUCT_IDS = [0xE001, 0x0004]; // Generic TI USB / SilverLink entry points
+
+    let device;
+    let fileData = null;
+
+    const connectBtn = document.getElementById('connectBtn');
+    const sendBtn = document.getElementById('sendBtn');
+    const fileInput = document.getElementById('fileInput');
+    const statusText = document.getElementById('status');
+
+    // 1. Connect to the Calculator
+    connectBtn.addEventListener('click', async () => {
+        try {
+            statusText.textContent = "Requesting device pairing...";
+            
+            // Request permission to access the TI device
+            device = await navigator.usb.requestDevice({
+                filters: [{ vendorId: TI_VENDOR_ID }]
+            });
+
+            await device.open();
+            
+            // Select configuration and claim interface 0 (standard for basic USB transfers)
+            if (device.configuration === null) {
+                await device.selectConfiguration(1);
+            }
+            await device.claimInterface(0);
+
+            statusText.textContent = `Connected to ${device.productName || 'TI Device'}`;
+            statusText.style.color = "green";
+            fileInput.disabled = false;
+            
+        } catch (error) {
+            console.error(error);
+            statusText.textContent = `Connection failed: ${error.message}`;
+            statusText.style.color = "red";
+        }
+    });
+
+    // 2. Read the local file into a byte array
+    fileInput.addEventListener('change', (event) => {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            fileData = new Uint8Array(e.target.result);
+            sendBtn.disabled = false;
+            statusText.textContent = `Loaded ${file.name} (${fileData.length} bytes)`;
+        };
+        reader.readAsArrayBuffer(file);
+    });
+
+    // 3. Send data over USB
+    sendBtn.addEventListener('click', async () => {
+        if (!device || !fileData) return;
+
+        try {
+            statusText.textContent = "Sending file...";
+            
+            // Note: TI-89 protocol (TI-LINK) requires data wrapping.
+            // A raw file buffer must be encapsulated into TI Protocol frames.
+            const packet = buildTiPacket(fileData);
+
+            // Endpoint 1 is typically used for Outbound (Host -> Device) data in bulk transfers
+            // adjustments may be required depending on the exact cable/endpoint schema (e.g., endpoint 1 or 2)
+            const endpointOut = 1; 
+            
+            let result = await device.transferOut(endpointOut, packet);
+            
+            if (result.status === 'ok') {
+                statusText.textContent = "Transfer complete! Check calculator.";
+                statusText.style.color = "blue";
+            } else {
+                statusText.textContent = `Transfer failed: ${result.status}`;
+            }
+
+        } catch (error) {
+            console.error(error);
+            statusText.textContent = `Error during transmission: ${error.message}`;
+            statusText.style.color = "red";
+        }
+    });
+
+    /**
+     * Helper function to wrap raw data into TI-Link Protocol format
+     * TI Protocol basic structure: [Machine ID] [Command ID] [Length LSB] [Length MSB] [Data...] [Checksum LSB] [Checksum MSB]
+     */
+    function buildTiPacket(rawBytes) {
+        const headerLength = 4;
+        const checksumLength = 2;
+        const totalLength = headerLength + rawBytes.length + checksumLength;
+        
+        const packet = new Uint8Array(totalLength);
+        
+        // Machine ID for TI-89 computer transfers is traditionally 0x08 or 0x09
+        packet[0] = 0x08; 
+        // Command ID (e.g., 0x06 for Data packet / Variable header)
+        packet[1] = 0x06; 
+        
+        // Data length (16-bit little endian)
+        packet[2] = rawBytes.length & 0xFF;
+        packet[3] = (rawBytes.length >> 8) & 0xFF;
+        
+        // Copy actual payload
+        packet.set(rawBytes, headerLength);
+        
+        // Calculate 16-bit checksum (Sum of all data bytes)
+        let checksum = 0;
+        for (let i = 0; i < rawBytes.length; i++) {
+            checksum = (checksum + rawBytes[i]) & 0xFFFF;
+        }
+        
+        // Append checksum at the end
+        packet[totalLength - 2] = checksum & 0xFF;
+        packet[totalLength - 1] = (checksum >> 8) & 0xFF;
+        
+        return packet;
+    }
+</script>
+
+</body>
+</html>
