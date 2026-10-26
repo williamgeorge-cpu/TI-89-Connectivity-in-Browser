@@ -92,17 +92,32 @@ sendBtn.addEventListener('click', async () => {
     reader.readAsArrayBuffer(file);
 });
 
-// 3. Protocol Transmission Logic
 async function sendTIFile(bytes) {
-    // Note: TI-89 Titanium usually relies on Endpoint 1 for Outbound Bulk transfers
-    const endpointOut = 1; 
-    log("Sending packet header...");
-    
-    const result = await usbDevice.transferOut(endpointOut, bytes);
-    if (result.status !== 'ok') {
-        throw new Error("USB transfer failed packet delivery.");
-    }
+  // 1. Find the claimed interface (Interface 0) in the active configuration
+  const activeInterface = usbDevice.configuration.interfaces.find(i => i.interfaceNumber === 0);
+  
+  if (!activeInterface) {
+    throw new Error("Interface 0 not found in configuration.");
+  }
+
+  // 2. Dynamically search for the first 'out' (outbound) endpoint
+  const alternate = activeInterface.alternates[0];
+  const outEndpoint = alternate.endpoints.find(e => e.direction === 'out');
+
+  if (!outEndpoint) {
+    throw new Error("No outbound (OUT) endpoint found on Interface 0.");
+  }
+
+  const endpointOut = outEndpoint.endpointNumber;
+  log(`Sending packet header via Endpoint ${endpointOut}...`);
+
+  // 3. Perform the transfer using the dynamically discovered endpoint
+  const result = await usbDevice.transferOut(endpointOut, bytes);
+  if (result.status !== 'ok') {
+    throw new Error("USB transfer failed packet delivery.");
+  }
 }
+
 </script>
 </body>
 </html>
