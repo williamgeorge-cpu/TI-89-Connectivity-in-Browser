@@ -27,14 +27,13 @@
 <script>
 const TI_VENDOR_ID = 0x0451;
 const TI_89_PIDS = [0xe004, 0xe00e];
-
 let usbDevice = null;
 let endpointOut = null;
 let endpointIn = null;
 let isPolling = false;
 
 // Protocol State Machine Tracker
-let currentTxState = 'IDLE'; 
+let currentTxState = 'IDLE';
 let cachedDataPayload = null;
 
 const connectBtn = document.getElementById('connectBtn');
@@ -51,8 +50,8 @@ connectBtn.addEventListener('click', async () => {
     try {
         const filters = TI_89_PIDS.map(pid => ({ vendorId: TI_VENDOR_ID, productId: pid }));
         usbDevice = await navigator.usb.requestDevice({ filters: filters });
-        
         await usbDevice.open();
+        
         if (usbDevice.configuration === null) {
             await usbDevice.selectConfiguration(1);
         }
@@ -69,10 +68,10 @@ connectBtn.addEventListener('click', async () => {
         isPolling = true;
         startBackgroundReader();
 
-        // Send a sequence of null connection frames to force wake the calculator link layers
         log("Waking up hardware link layer...");
-        await usbDevice.transferOut(endpointOut, new Uint8Array([0x21, 0x01, 0x00, 0x00])); 
-
+        // Corrected USB Direct link layer empty/wake frame length fields (0x02, 0x00 instead of 0x00, 0x00)
+        await usbDevice.transferOut(endpointOut, new Uint8Array([0x21, 0x01, 0x02, 0x00, 0x00, 0x00]));
+        
         fileInput.disabled = false;
         sendBtn.disabled = false;
     } catch (error) {
@@ -82,7 +81,6 @@ connectBtn.addEventListener('click', async () => {
 
 sendBtn.addEventListener('click', async () => {
     if (!usbDevice || !fileInput.files.length) return;
-    
     const file = fileInput.files[0];
     const reader = new FileReader();
     reader.onload = async (event) => {
@@ -112,12 +110,17 @@ async function startBackgroundReader() {
             let result = await usbDevice.transferIn(endpointIn, 64);
             if (result.status === 'ok' && result.data.byteLength > 0) {
                 parseIncomingBytes(new Uint8Array(result.data.buffer));
+            } else {
+                // Yield thread if transaction completes with no data
+                await new Promise(r => setTimeout(r, 10));
             }
         } catch (err) {
-            // Do not break the loop on regular timeouts or stalls
             if (err.message.includes("active") || err.message.includes("disconnected")) {
                 log(`Pump halted: ${err.message}`);
                 isPolling = false;
+            } else {
+                // Throttle execution on standard USB timeouts/stalls to prevent UI thread lockups
+                await new Promise(r => setTimeout(r, 10));
             }
         }
     }
@@ -130,10 +133,8 @@ function parseIncomingBytes(bytes) {
             if (offset + 5 >= bytes.length) break;
             const cmd = bytes[offset + 5];
             const packetLen = bytes[offset + 2] | (bytes[offset + 3] << 8);
-            
             log(`Pump captured incoming packet Command ID: 0x${cmd.toString(16).toUpperCase()}`);
             handleProtocolState(cmd);
-            
             offset += 4 + packetLen;
         } else {
             offset++;
@@ -150,7 +151,7 @@ async function handleProtocolState(incomingCmd) {
         // Send ACK back
         const ackPacket = makeUSBDirectPacket(0x56);
         await usbDevice.transferOut(endpointOut, ackPacket);
-        
+
         // Follow up instantly with Data Payload
         log("Pushing data payload block...");
         const dataPacket = makeUSBDirectPacket(0x15, cachedDataPayload);
@@ -172,8 +173,9 @@ function makeUSBDirectPacket(cmd, dataBytes = new Uint8Array(0)) {
     const tiFrameLen = 4 + payloadLen;
     const usbWrapperLen = tiFrameLen + 2;
     const packet = new Uint8Array(4 + usbWrapperLen);
-
-    packet[0] = 0x21; packet[1] = 0x01;
+    
+    packet[0] = 0x21;
+    packet[1] = 0x01;
     packet[2] = usbWrapperLen & 0xFF;
     packet[3] = (usbWrapperLen >> 8) & 0xFF;
     packet[4] = 0x08; // Machine ID
@@ -181,14 +183,13 @@ function makeUSBDirectPacket(cmd, dataBytes = new Uint8Array(0)) {
     packet[6] = payloadLen & 0xFF;
     packet[7] = (payloadLen >> 8) & 0xFF;
     packet.set(dataBytes, 8);
-
+    
     let checksum = 0;
     for (let i = 4; i < 4 + tiFrameLen; i++) {
         checksum = (checksum + packet[i]) & 0xFFFF;
     }
     packet[4 + tiFrameLen] = checksum & 0xFF;
     packet[5 + tiFrameLen] = (checksum >> 8) & 0xFFFF;
-
     return packet;
 }
 </script>
