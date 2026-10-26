@@ -9,7 +9,7 @@
         .container { max-width: 600px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
         button { background: #007bff; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; font-size: 16px; }
         button:hover { background: #0056b3; }
-        .status { margin-top: 20px; padding: 10px; border-left: 4px solid #007bff; background: #e9ecef; white-space: pre-line; }
+        .status { margin-top: 20px; padding: 10px; border-left: 4px solid #007bff; background: #e9ecef; white-space: pre-line; font-family: monospace; }
         input[type="file"] { margin: 15px 0; display: block; }
     </style>
 </head>
@@ -37,6 +37,7 @@ const statusLog = document.getElementById('statusLog');
 
 function log(message) {
     statusLog.textContent = `Status: ${message}`;
+    console.log(message);
 }
 
 connectBtn.addEventListener('click', async () => {
@@ -89,32 +90,40 @@ sendBtn.addEventListener('click', async () => {
 
 function makeUSBDirectPacket(cmd, dataBytes = new Uint8Array(0)) {
     const payloadLen = dataBytes.length;
-    const linkPacketLen = 4 + payloadLen + 2; 
-    const packet = new Uint8Array(4 + linkPacketLen);
     
-    // 1. USB Link Layer Wrapper Header
-    packet[0] = 0x21; 
-    packet[1] = 0x01; 
-    packet[2] = linkPacketLen & 0xFF;
-    packet[3] = (linkPacketLen >> 8) & 0xFF;
+    // Standard TI Frame length is: Machine ID (1) + Command ID (1) + Data Length (2) + Payload Length
+    const tiFrameLen = 4 + payloadLen; 
     
+    // USB Wrapper Layer length field includes the TI Frame + 2 bytes for the Checksum
+    const usbWrapperLen = tiFrameLen + 2; 
+
+    const packet = new Uint8Array(4 + usbWrapperLen);
+
+    // 1. USB Link Layer Wrapper Header (0x21, 0x01, followed by 16-bit length)
+    packet[0] = 0x21;
+    packet[1] = 0x01;
+    packet[2] = usbWrapperLen & 0xFF;
+    packet[3] = (usbWrapperLen >> 8) & 0xFF;
+
     // 2. Calculator Standard Packet Frame
-    packet[4] = 0x08; 
-    packet[5] = cmd; 
+    packet[4] = 0x08; // Machine ID (0x08 for TI-89 Titanium link)
+    packet[5] = cmd;  // Command ID (e.g., 0x06 RTS, 0x56 ACK)
     packet[6] = payloadLen & 0xFF;
     packet[7] = (payloadLen >> 8) & 0xFF;
-    
-    // 3. Set the variables payload
+
+    // 3. Inject payload data
     packet.set(dataBytes, 8);
-    
-    // 4. Compute 16-bit lower-checksum of the payload data
+
+    // 4. Correct Checksum: Must sum all bytes of the TI Standard Frame (Indices 4 through 4 + tiFrameLen - 1)
     let checksum = 0;
-    for (let i = 0; i < payloadLen; i++) {
-        checksum = (checksum + dataBytes[i]) & 0xFFFF;
+    for (let i = 4; i < 4 + tiFrameLen; i++) {
+        checksum = (checksum + packet[i]) & 0xFFFF;
     }
-    packet[8 + payloadLen] = checksum & 0xFF;
-    packet[9 + payloadLen] = (checksum >> 8) & 0xFFFF;
     
+    packet[4 + tiFrameLen] = checksum & 0xFF;
+    packet[5 + tiFrameLen] = (checksum >> 8) & 0xFF;
+
+    console.log(`Generated Packet (Cmd: 0x${cmd.toString(16)}):`, Array.from(packet).map(b => b.toString(16).padStart(2, '0')).join(' '));
     return packet;
 }
 
@@ -122,27 +131,35 @@ async function transferTI89File(rawFileBytes) {
     if (rawFileBytes.length < 0x5A) {
         throw new Error("Invalid or corrupt TI file layout length.");
     }
-
+    
+    // TI-89 files (*.89i, *.89v, etc.) store variable lengths at offset 0x44
     const dataLenLSB = rawFileBytes[0x44];
     const dataLenMSB = rawFileBytes[0x45];
     const variableDataLength = dataLenLSB | (dataLenMSB << 8);
+    
+    // RTS header payload spans 16 bytes starting at 0x4A
     const rtsPayload = rawFileBytes.slice(0x4A, 0x5A);
     const dataPayload = rawFileBytes.slice(0x5A, 0x5A + variableDataLength);
 
-    // Parses a incoming USB buffer, pulling out all sequential Command IDs inside it
     function parseCommandIDs(result) {
         const cmds = [];
         if (!result || result.status !== 'ok' || !result.data) return cmds;
-        const view = result.data;
+        
+        const view = new DataView(result.data.buffer);
         let offset = 0;
+        
+        // Print raw incoming buffer hex for immediate physical verification
+        const rawHex = Array.from(new Uint8Array(result.data.buffer)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+        console.log(`Raw bytes received: ${rawHex}`);
+
         while (offset + 6 <= view.byteLength) {
             if (view.getUint8(offset) === 0x21) {
                 const linkPacketLen = view.getUint8(offset + 2) | (view.getUint8(offset + 3) << 8);
                 const cmd = view.getUint8(offset + 5);
                 cmds.push(cmd);
-                offset += 4 + linkPacketLen; 
+                offset += 4 + linkPacketLen;
             } else {
-                break;
+                offset++; // Advance safely if out of alignment sync
             }
         }
         return cmds;
@@ -153,30 +170,33 @@ async function transferTI89File(rawFileBytes) {
     const rtsPacket = makeUSBDirectPacket(0x06, rtsPayload);
     await usbDevice.transferOut(endpointOut, rtsPacket);
 
-    // 2. Read the calculator's response sequence (Handles combined ACK + CTS buffers)
+    // 2. Read response loop
     log("Waiting for Clear To Send (CTS)...");
     let hasCTS = false;
     let attempts = 0;
     
-    while (!hasCTS && attempts < 5) {
+    while (!hasCTS && attempts < 10) {
         attempts++;
         let response = await usbDevice.transferIn(endpointIn, 64);
         let receivedCmds = parseCommandIDs(response);
+        
+        log(`Read attempt #${attempts}. Found Commands: ${receivedCmds.map(c => '0x' + c.toString(16)).join(', ')}`);
         
         if (receivedCmds.includes(0x09)) {
             hasCTS = true;
             break;
         }
-        if (receivedCmds.includes(0x56)) {
-            continue; // Got ACK standalone; loop once more to capture the separated CTS packet
+        // If calculator sends an error/rejection code (like 0x5A or an invalid command response)
+        if (receivedCmds.length > 0 && !receivedCmds.includes(0x56)) {
+            throw new Error(`Calculator explicitly rejected or didn't understand the request. Codes: ${receivedCmds.map(c => '0x' + c.toString(16)).join(', ')}`);
         }
-        if (receivedCmds.length > 0) {
-            throw new Error(`Calculator rejected transmission. Got codes: ${receivedCmds.map(c => '0x' + c.toString(16)).join(', ')}`);
-        }
+        
+        // Brief artificial pause to let hardware keep up
+        await new Promise(r => setTimeout(r, 100));
     }
 
     if (!hasCTS) {
-        throw new Error("Timed out waiting for Clear To Send (CTS) packet.");
+        throw new Error("Timed out waiting for Clear To Send (CTS). Check that the calculator is turned on, sitting on the home screen, and not busy.");
     }
 
     // 3. Acknowledge the CTS back to the calculator
@@ -189,17 +209,15 @@ async function transferTI89File(rawFileBytes) {
     const dataPacket = makeUSBDirectPacket(0x15, dataPayload);
     await usbDevice.transferOut(endpointOut, dataPacket);
 
-    // 5. Read calculator's final ACK for the data payload
+    // 5. Read calculator's final ACK
     log("Waiting for data acknowledgment...");
     let finalResponse = await usbDevice.transferIn(endpointIn, 64);
     let finalCmds = parseCommandIDs(finalResponse);
     
     if (finalCmds.includes(0x56)) {
         log("File sent and successfully accepted by TI-89 Titanium!");
-    } else if (finalCmds.length > 0) {
-        log(`Data transmitted, but unexpected final code: 0x${finalCmds[0].toString(16)}`);
     } else {
-        throw new Error("No final receipt acknowledgement from the calculator.");
+        log(`Data transmitted, but unexpected final code or no response.`);
     }
 }
 </script>
