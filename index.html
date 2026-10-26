@@ -87,29 +87,26 @@ sendBtn.addEventListener('click', async () => {
     reader.readAsArrayBuffer(file);
 });
 
-// Creates a properly framed USB direct packet for hardware endpoints
 function makeUSBDirectPacket(cmd, dataBytes = new Uint8Array(0)) {
     const payloadLen = dataBytes.length;
-    // linkPacketLen covers the inner header (4 bytes) + data payload + checksum (2 bytes)
-    const linkPacketLen = 4 + payloadLen + 2;
-    // Total USB buffer must be exactly 4 bytes (wrapper header) + linkPacketLen
+    const linkPacketLen = 4 + payloadLen + 2; 
     const packet = new Uint8Array(4 + linkPacketLen);
-
+    
     // 1. USB Link Layer Wrapper Header
-    packet[0] = 0x21; // Direct USB command prefix
-    packet[1] = 0x01; // Data transfer flag
+    packet[0] = 0x21; 
+    packet[1] = 0x01; 
     packet[2] = linkPacketLen & 0xFF;
     packet[3] = (linkPacketLen >> 8) & 0xFF;
-
+    
     // 2. Calculator Standard Packet Frame
-    packet[4] = 0x08; // Machine ID: TI-89 Titanium
-    packet[5] = cmd;  // Command ID (0x06=RTS, 0x15=DATA, 0x56=ACK)
+    packet[4] = 0x08; 
+    packet[5] = cmd; 
     packet[6] = payloadLen & 0xFF;
     packet[7] = (payloadLen >> 8) & 0xFF;
-
+    
     // 3. Set the variables payload
     packet.set(dataBytes, 8);
-
+    
     // 4. Compute 16-bit lower-checksum of the payload data
     let checksum = 0;
     for (let i = 0; i < payloadLen; i++) {
@@ -117,7 +114,7 @@ function makeUSBDirectPacket(cmd, dataBytes = new Uint8Array(0)) {
     }
     packet[8 + payloadLen] = checksum & 0xFF;
     packet[9 + payloadLen] = (checksum >> 8) & 0xFFFF;
-
+    
     return packet;
 }
 
@@ -125,36 +122,61 @@ async function transferTI89File(rawFileBytes) {
     if (rawFileBytes.length < 0x5A) {
         throw new Error("Invalid or corrupt TI file layout length.");
     }
-    
-    // Parse length and metadata payload variables
+
     const dataLenLSB = rawFileBytes[0x44];
     const dataLenMSB = rawFileBytes[0x45];
     const variableDataLength = dataLenLSB | (dataLenMSB << 8);
-    
     const rtsPayload = rawFileBytes.slice(0x4A, 0x5A);
     const dataPayload = rawFileBytes.slice(0x5A, 0x5A + variableDataLength);
+
+    // Parses a incoming USB buffer, pulling out all sequential Command IDs inside it
+    function parseCommandIDs(result) {
+        const cmds = [];
+        if (!result || result.status !== 'ok' || !result.data) return cmds;
+        const view = result.data;
+        let offset = 0;
+        while (offset + 6 <= view.byteLength) {
+            if (view.getUint8(offset) === 0x21) {
+                const linkPacketLen = view.getUint8(offset + 2) | (view.getUint8(offset + 3) << 8);
+                const cmd = view.getUint8(offset + 5);
+                cmds.push(cmd);
+                offset += 4 + linkPacketLen; 
+            } else {
+                break;
+            }
+        }
+        return cmds;
+    }
 
     // 1. Send Request to Send (RTS)
     log("Sending Request to Send (RTS)...");
     const rtsPacket = makeUSBDirectPacket(0x06, rtsPayload);
     await usbDevice.transferOut(endpointOut, rtsPacket);
 
-    // 2. Read the calculator's response response sequence (CTS / ACK combo)
+    // 2. Read the calculator's response sequence (Handles combined ACK + CTS buffers)
     log("Waiting for Clear To Send (CTS)...");
-    let response = await usbDevice.transferIn(endpointIn, 64);
-    if (response.status !== 'ok' || response.data.byteLength < 6) {
-        throw new Error("Device timed out or sent an empty response to RTS.");
-    }
+    let hasCTS = false;
+    let attempts = 0;
     
-    let responseCmd = response.data.getUint8(5);
-    // If the calculator returns an ACK (0x56), read immediately again to grab the CTS (0x09)
-    if (responseCmd === 0x56) {
-        response = await usbDevice.transferIn(endpointIn, 64);
-        responseCmd = response.data.getUint8(5);
+    while (!hasCTS && attempts < 5) {
+        attempts++;
+        let response = await usbDevice.transferIn(endpointIn, 64);
+        let receivedCmds = parseCommandIDs(response);
+        
+        if (receivedCmds.includes(0x09)) {
+            hasCTS = true;
+            break;
+        }
+        if (receivedCmds.includes(0x56)) {
+            continue; // Got ACK standalone; loop once more to capture the separated CTS packet
+        }
+        if (receivedCmds.length > 0) {
+            throw new Error(`Calculator rejected transmission. Got codes: ${receivedCmds.map(c => '0x' + c.toString(16)).join(', ')}`);
+        }
     }
-    
-    if (responseCmd !== 0x09) {
-        throw new Error(`Calculator rejected transmission. Expected CTS (0x09), got: 0x${responseCmd.toString(16)}`);
+
+    if (!hasCTS) {
+        throw new Error("Timed out waiting for Clear To Send (CTS) packet.");
     }
 
     // 3. Acknowledge the CTS back to the calculator
@@ -169,14 +191,13 @@ async function transferTI89File(rawFileBytes) {
 
     // 5. Read calculator's final ACK for the data payload
     log("Waiting for data acknowledgment...");
-    response = await usbDevice.transferIn(endpointIn, 64);
-    if (response.status === 'ok' && response.data.byteLength >= 6) {
-        let finalCmd = response.data.getUint8(5);
-        if (finalCmd === 0x56) {
-            log("File sent and successfully accepted by TI-89 Titanium!");
-        } else {
-            log(`Data transmitted, but unexpected final code: 0x${finalCmd.toString(16)}`);
-        }
+    let finalResponse = await usbDevice.transferIn(endpointIn, 64);
+    let finalCmds = parseCommandIDs(finalResponse);
+    
+    if (finalCmds.includes(0x56)) {
+        log("File sent and successfully accepted by TI-89 Titanium!");
+    } else if (finalCmds.length > 0) {
+        log(`Data transmitted, but unexpected final code: 0x${finalCmds[0].toString(16)}`);
     } else {
         throw new Error("No final receipt acknowledgement from the calculator.");
     }
