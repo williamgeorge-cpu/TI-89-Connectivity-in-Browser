@@ -3,160 +3,116 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TI-89 Titanium WebUSB Linker</title>
+    <title>TI-89 Titanium WebUSB Link</title>
     <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            max-width: 600px;
-            margin: 40px auto;
-            padding: 20px;
-            background-color: #f5f5f7;
-            color: #1d1d1f;
-            border-radius: 12px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-        }
-        h2 { border-bottom: 2px solid #d2d2d7; padding-bottom: 8px; }
-        .control-group { margin: 20px 0; }
-        button {
-            background-color: #0071e3;
-            color: white;
-            border: none;
-            padding: 10px 16px;
-            font-size: 14px;
-            border-radius: 6px;
-            cursor: pointer;
-            margin-right: 8px;
-        }
-        button:disabled { background-color: #aeaeaf; cursor: not-allowed; }
-        #status {
-            padding: 12px;
-            border-radius: 6px;
-            background-color: #e8e8ed;
-            font-family: monospace;
-            white-space: pre-wrap;
-            margin-top: 20px;
-        }
+        body { font-family: sans-serif; margin: 40px; background: #f4f4f9; color: #333; }
+        .container { max-width: 600px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        button { background: #007bff; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; font-size: 16px; }
+        button:hover { background: #0056b3; }
+        .status { margin-top: 20px; padding: 10px; border-left: 4px solid #007bff; background: #e9ecef; }
+        input[type="file"] { margin: 15px 0; display: block; }
     </style>
 </head>
 <body>
 
-    <h2>TI-89 Titanium USB File Transfer</h2>
+<div class="container">
+    <h2>TI-89 Titanium File Sender</h2>
+    <p>Connect your TI-89 Titanium via USB, click "Connect", and select a file (.89i, .89t, .89z, etc.) to transmit.</p>
     
-    <div class="control-group">
-        <button id="connectBtn">🔌 Connect TI-89 Titanium</button>
-        <span id="deviceInfo">No device connected.</span>
-    </div>
+    <button id="connectBtn">Connect Calculator</button>
+    <input type="file" id="fileInput" disabled />
+    <button id="sendBtn" disabled>Send File</button>
 
-    <div class="control-group">
-        <label for="fileInput"><strong>Select File (.89i, .89p, .89z, etc.):</strong></label><br><br>
-        <input type="file" id="fileInput" disabled />
-    </div>
+    <div class="status" id="statusLog">Status: Disconnected</div>
+</div>
 
-    <div class="control-group">
-        <button id="sendBtn" disabled>📤 Send File to Calculator</button>
-    </div>
+<script>
+    // TI-89 Titanium USB Vendor ID (Texas Instruments) and Product ID
+    const TI_VENDOR_ID = 0x0451; 
+    const TI_89_PRODUCT_ID = 0xe008; // Typical SilverLink/Direct USB PID
 
-    <h3>Status Log</h3>
-    <div id="status">Ready. Connect your calculator to begin.</div>
+    let usbDevice = null;
 
-    <script>
-        // Texas Instruments Vendor ID & TI-89 Titanium Product ID
-        const TI_VENDOR_ID = 0x0451; 
-        const TI89_TITANIUM_PID = 0xE005; 
+    const connectBtn = document.getElementById('connectBtn');
+    const sendBtn = document.getElementById('sendBtn');
+    const fileInput = document.getElementById('fileInput');
+    const statusLog = document.getElementById('statusLog');
 
-        let device = null;
-        let selectedFileBuffer = null;
+    function log(message) {
+        statusLog.textContent = `Status: ${message}`;
+    }
 
-        const connectBtn = document.getElementById('connectBtn');
-        const fileInput = document.getElementById('fileInput');
-        const sendBtn = document.getElementById('sendBtn');
-        const statusDiv = document.getElementById('status');
-        const deviceInfo = document.getElementById('deviceInfo');
+    // 1. Request connection to the calculator
+    connectBtn.addEventListener('click', async () => {
+        try {
+            usbDevice = await navigator.usb.requestDevice({
+                filters: [{ vendorId: TI_VENDOR_ID, productId: TI_89_PRODUCT_ID }]
+            });
 
-        function log(message) {
-            statusDiv.textContent += "\n" + message;
-            statusDiv.scrollTop = statusDiv.scrollHeight;
+            await usbDevice.open();
+            // Select configuration #1 if not already active
+            if (usbDevice.configuration === null) {
+                await usbDevice.selectConfiguration(1);
+            }
+            // Claim interface #0 (TI calculators typically expose a single custom interface)
+            await usbDevice.claimInterface(0);
+
+            log(`Connected to ${usbDevice.productName}`);
+            fileInput.disabled = false;
+            sendBtn.disabled = false;
+        } catch (error) {
+            console.error(error);
+            log(`Connection failed: ${error.message}`);
+        }
+    });
+
+    // 2. Read file and trigger transmission logic
+    sendBtn.addEventListener('click', async () => {
+        if (!usbDevice || !fileInput.files.length) {
+            log("Please connect a device and select a file first.");
+            return;
         }
 
-        // 1. Connect to the Calculator via WebUSB
-        connectBtn.addEventListener('click', async () => {
+        const file = fileInput.files[0];
+        const reader = new FileReader();
+
+        reader.onload = async (event) => {
+            const arrayBuffer = event.target.result;
+            const fileBytes = new Uint8Array(arrayBuffer);
+
+            log(`Preparing to send ${file.name} (${fileBytes.length} bytes)...`);
+            
             try {
-                log("Requesting USB device selection...");
-                device = await navigator.usb.requestDevice({
-                    filters: [{ vendorId: TI_VENDOR_ID, productId: TI89_TITANIUM_PID }]
-                });
-
-                log(`Connected to: ${device.productName || 'TI-89 Titanium'}`);
-                deviceInfo.textContent = `${device.productName} (Ready)`;
-
-                log("Opening session...");
-                await device.open();
-                
-                log("Selecting configuration...");
-                await device.selectConfiguration(1);
-                
-                log("Claiming interface 0...");
-                await device.claimInterface(0);
-
-                log("USB Interface successfully initialized.");
-                fileInput.disabled = false;
+                await sendTIFile(fileBytes);
+                log("File sent successfully!");
             } catch (error) {
-                log(`Connection Error: ${error.message}`);
                 console.error(error);
+                log(`Transfer error: ${error.message}`);
             }
-        });
+        };
 
-        // 2. Read local file into array buffer
-        fileInput.addEventListener('change', (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
+        reader.readAsArrayBuffer(file);
+    });
 
-            const reader = new FileReader();
-            reader.onload = function(event) {
-                selectedFileBuffer = event.target.result;
-                log(`Loaded file: ${file.name} (${selectedFileBuffer.byteLength} bytes)`);
-                sendBtn.disabled = false;
-            };
-            reader.readAsArrayBuffer(file);
-        });
+    // 3. Protocol Transmission Logic
+    async function sendTIFile(bytes) {
+        // TI-Protocol requires a handshake/header packet before raw variable data is pushed.
+        // Endpoint 1 or 2 is typically used for Outbound transfers depending on the interface configuration.
+        const endpointOut = 1; 
 
-        // 3. Send file data over the bulk endpoints
-        sendBtn.addEventListener('click', async () => {
-            if (!device || !selectedFileBuffer) return;
-
-            try {
-                sendBtn.disabled = true;
-                log("Preparing TI protocol header transmission...");
-
-                // TI Link Protocol involves 4 basic packet components:
-                // [Machine ID] [Command ID] [Data Length Low] [Data Length High]
-                // Followed by the data bytes and a 2-byte checksum.
-                
-                const fileData = new Uint8Array(selectedFileBuffer);
-                
-                // Construct basic TI link protocol structure variables 
-                // TI-89 Direct USB typically uses Endpoint 1 for Outgoing (Bulk Write) 
-                // and Endpoint 2 or 1 for Incoming (Bulk Read).
-                const endpointOut = 1; 
-
-                log("Sending data packet payload via Bulk Transfer...");
-                
-                // WebUSB transferOut requires endpoint index and data buffer
-                let result = await device.transferOut(endpointOut, fileData);
-                
-                if (result.status === 'ok') {
-                    log(`Successfully pushed ${result.bytesWritten} bytes to the TI-89! Check your calculator screen for receiving status.`);
-                } else {
-                    log(`Transfer status: ${result.status}`);
-                }
-
-            } catch (error) {
-                log(`Transfer failed: ${error.message}`);
-                log("Ensure your calculator is turned on, sitting on the Home screen, and the link cable is secure.");
-            } finally {
-                sendBtn.disabled = false;
-            }
-        });
-    </script>
+        // NOTE: You must format 'bytes' into valid TI-Link packets.
+        // A generic packet structure consists of:
+        // [Machine ID] [Command ID] [Length LSB] [Length MSB] [Data...] [Checksum LSB] [Checksum MSB]
+        
+        log("Sending packet header...");
+        // Example: Sending the raw bytes directly (Requires the file to already contain the 
+        // proper native TI variable headers if sending unpacketized data stream)
+        const result = await usbDevice.transferOut(endpointOut, bytes);
+        
+        if (result.status !== 'ok') {
+            throw new Error("USB transfer failed packet delivery.");
+        }
+    }
+</script>
 </body>
 </html>
