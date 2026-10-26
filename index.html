@@ -3,32 +3,39 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TI-89 Titanium WebUSB Link</title>
+    <title>TI-89 Titanium Reactive WebUSB Link</title>
     <style>
         body { font-family: sans-serif; margin: 40px; background: #f4f4f9; color: #333; }
         .container { max-width: 600px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        button { background: #007bff; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; font-size: 16px; }
-        button:hover { background: #0056b3; }
-        .status { margin-top: 20px; padding: 10px; border-left: 4px solid #007bff; background: #e9ecef; white-space: pre-line; font-family: monospace; }
+        button { background: #e65c00; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; font-size: 16px; font-weight: bold; }
+        button:hover { background: #cc5200; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        .status { margin-top: 20px; padding: 10px; border-left: 4px solid #e65c00; background: #e9ecef; white-space: pre-line; font-family: monospace; height: 200px; overflow-y: auto; }
         input[type="file"] { margin: 15px 0; display: block; }
     </style>
 </head>
 <body>
 <div class="container">
-    <h2>TI-89 Titanium File Sender</h2>
-    <p>Connect your TI-89 Titanium via USB, click "Connect", and select a file to transmit.</p>
-    <button id="connectBtn">Connect Calculator</button>
+    <h2>TI-89 Titanium Reactive Sender</h2>
+    <p>Architecture: Continuous Inbound Reactive Architecture</p>
+    <button id="connectBtn">Connect & Initialize Pump</button>
     <input type="file" id="fileInput" disabled />
-    <button id="sendBtn" disabled>Send File</button>
-    <div class="status" id="statusLog">Status: Disconnected</div>
+    <button id="sendBtn" disabled>Transmit File</button>
+    <div class="status" id="statusLog">Status: Standby.</div>
 </div>
 
 <script>
 const TI_VENDOR_ID = 0x0451;
 const TI_89_PIDS = [0xe004, 0xe00e];
+
 let usbDevice = null;
 let endpointOut = null;
 let endpointIn = null;
+let isPolling = false;
+
+// Protocol State Machine Tracker
+let currentTxState = 'IDLE'; 
+let cachedDataPayload = null;
 
 const connectBtn = document.getElementById('connectBtn');
 const sendBtn = document.getElementById('sendBtn');
@@ -36,189 +43,153 @@ const fileInput = document.getElementById('fileInput');
 const statusLog = document.getElementById('statusLog');
 
 function log(message) {
-    statusLog.textContent = `Status: ${message}`;
-    console.log(message);
+    statusLog.textContent += `\n[${new Date().toLocaleTimeString()}] ${message}`;
+    statusLog.scrollTop = statusLog.scrollHeight;
 }
 
 connectBtn.addEventListener('click', async () => {
     try {
         const filters = TI_89_PIDS.map(pid => ({ vendorId: TI_VENDOR_ID, productId: pid }));
         usbDevice = await navigator.usb.requestDevice({ filters: filters });
+        
         await usbDevice.open();
         if (usbDevice.configuration === null) {
             await usbDevice.selectConfiguration(1);
         }
         await usbDevice.claimInterface(0);
-        
+
         const activeInterface = usbDevice.configuration.interfaces.find(i => i.interfaceNumber === 0);
         const alternate = activeInterface.alternates[0];
-        const outEp = alternate.endpoints.find(e => e.direction === 'out');
-        const inEp = alternate.endpoints.find(e => e.direction === 'in');
+        endpointOut = alternate.endpoints.find(e => e.direction === 'out').endpointNumber;
+        endpointIn = alternate.endpoints.find(e => e.direction === 'in').endpointNumber;
+
+        log(`Connected. Initializing reactive background reader...`);
         
-        if (!outEp || !inEp) throw new Error("Endpoints missing.");
-        endpointOut = outEp.endpointNumber;
-        endpointIn = inEp.endpointNumber;
-        
-        log(`Connected to ${usbDevice.productName || 'TI-89 Titanium'}\nReady to send.`);
+        // Start the reading pump immediately
+        isPolling = true;
+        startBackgroundReader();
+
+        // Send a sequence of null connection frames to force wake the calculator link layers
+        log("Waking up hardware link layer...");
+        await usbDevice.transferOut(endpointOut, new Uint8Array([0x21, 0x01, 0x00, 0x00])); 
+
         fileInput.disabled = false;
         sendBtn.disabled = false;
     } catch (error) {
-        console.error(error);
-        log(`Connection failed: ${error.message}`);
+        log(`Init Failure: ${error.message}`);
     }
 });
 
 sendBtn.addEventListener('click', async () => {
-    if (!usbDevice || !fileInput.files.length) {
-        log("Please connect a device and select a file first.");
-        return;
-    }
+    if (!usbDevice || !fileInput.files.length) return;
+    
     const file = fileInput.files[0];
     const reader = new FileReader();
     reader.onload = async (event) => {
-        const fileBytes = new Uint8Array(event.target.result);
-        try {
-            log(`Parsing file structure...`);
-            await transferTI89File(fileBytes);
-        } catch (error) {
-            console.error(error);
-            log(`Transfer error: ${error.message}`);
+        const rawBytes = new Uint8Array(event.target.result);
+        if (rawBytes.length < 0x5A) {
+            log("Error: File sizing does not conform to standard TI targets.");
+            return;
         }
+
+        const dataLen = rawBytes[0x44] | (rawBytes[0x45] << 8);
+        const rtsPayload = rawBytes.slice(0x4A, 0x5A);
+        cachedDataPayload = rawBytes.slice(0x5A, 0x5A + dataLen);
+
+        // Move the state machine forward and fire RTS
+        currentTxState = 'AWAITING_CTS';
+        log("State changed -> AWAITING_CTS. Transmitting RTS...");
+        const rtsPacket = makeUSBDirectPacket(0x06, rtsPayload);
+        await usbDevice.transferOut(endpointOut, rtsPacket);
     };
     reader.readAsArrayBuffer(file);
 });
 
+// The Reactive Pump
+async function startBackgroundReader() {
+    while (isPolling) {
+        try {
+            let result = await usbDevice.transferIn(endpointIn, 64);
+            if (result.status === 'ok' && result.data.byteLength > 0) {
+                parseIncomingBytes(new Uint8Array(result.data.buffer));
+            }
+        } catch (err) {
+            // Do not break the loop on regular timeouts or stalls
+            if (err.message.includes("active") || err.message.includes("disconnected")) {
+                log(`Pump halted: ${err.message}`);
+                isPolling = false;
+            }
+        }
+    }
+}
+
+function parseIncomingBytes(bytes) {
+    let offset = 0;
+    while (offset < bytes.length) {
+        if (bytes[offset] === 0x21) {
+            if (offset + 5 >= bytes.length) break;
+            const cmd = bytes[offset + 5];
+            const packetLen = bytes[offset + 2] | (bytes[offset + 3] << 8);
+            
+            log(`Pump captured incoming packet Command ID: 0x${cmd.toString(16).toUpperCase()}`);
+            handleProtocolState(cmd);
+            
+            offset += 4 + packetLen;
+        } else {
+            offset++;
+        }
+    }
+}
+
+// State Machine logic handles reactions asynchronously when packets drop into the background pump
+async function handleProtocolState(incomingCmd) {
+    if (currentTxState === 'AWAITING_CTS' && incomingCmd === 0x09) {
+        currentTxState = 'SENDING_ACK_AND_DATA';
+        log("CTS Received! Advancing -> SENDING_ACK_AND_DATA");
+
+        // Send ACK back
+        const ackPacket = makeUSBDirectPacket(0x56);
+        await usbDevice.transferOut(endpointOut, ackPacket);
+        
+        // Follow up instantly with Data Payload
+        log("Pushing data payload block...");
+        const dataPacket = makeUSBDirectPacket(0x15, cachedDataPayload);
+        await usbDevice.transferOut(endpointOut, dataPacket);
+        
+        currentTxState = 'AWAITING_FINAL_ACK';
+        return;
+    }
+
+    if (currentTxState === 'AWAITING_FINAL_ACK' && incomingCmd === 0x56) {
+        currentTxState = 'IDLE';
+        log("SUCCESS! Final ACK verified. Transmission sequence finalized cleanly.");
+        return;
+    }
+}
+
 function makeUSBDirectPacket(cmd, dataBytes = new Uint8Array(0)) {
     const payloadLen = dataBytes.length;
-    
-    // Standard TI Frame length is: Machine ID (1) + Command ID (1) + Data Length (2) + Payload Length
-    const tiFrameLen = 4 + payloadLen; 
-    
-    // USB Wrapper Layer length field includes the TI Frame + 2 bytes for the Checksum
-    const usbWrapperLen = tiFrameLen + 2; 
-
+    const tiFrameLen = 4 + payloadLen;
+    const usbWrapperLen = tiFrameLen + 2;
     const packet = new Uint8Array(4 + usbWrapperLen);
 
-    // 1. USB Link Layer Wrapper Header (0x21, 0x01, followed by 16-bit length)
-    packet[0] = 0x21;
-    packet[1] = 0x01;
+    packet[0] = 0x21; packet[1] = 0x01;
     packet[2] = usbWrapperLen & 0xFF;
     packet[3] = (usbWrapperLen >> 8) & 0xFF;
-
-    // 2. Calculator Standard Packet Frame
-    packet[4] = 0x08; // Machine ID (0x08 for TI-89 Titanium link)
-    packet[5] = cmd;  // Command ID (e.g., 0x06 RTS, 0x56 ACK)
+    packet[4] = 0x08; // Machine ID
+    packet[5] = cmd;  // Command ID
     packet[6] = payloadLen & 0xFF;
     packet[7] = (payloadLen >> 8) & 0xFF;
-
-    // 3. Inject payload data
     packet.set(dataBytes, 8);
 
-    // 4. Correct Checksum: Must sum all bytes of the TI Standard Frame (Indices 4 through 4 + tiFrameLen - 1)
     let checksum = 0;
     for (let i = 4; i < 4 + tiFrameLen; i++) {
         checksum = (checksum + packet[i]) & 0xFFFF;
     }
-    
     packet[4 + tiFrameLen] = checksum & 0xFF;
-    packet[5 + tiFrameLen] = (checksum >> 8) & 0xFF;
+    packet[5 + tiFrameLen] = (checksum >> 8) & 0xFFFF;
 
-    console.log(`Generated Packet (Cmd: 0x${cmd.toString(16)}):`, Array.from(packet).map(b => b.toString(16).padStart(2, '0')).join(' '));
     return packet;
-}
-
-async function transferTI89File(rawFileBytes) {
-    if (rawFileBytes.length < 0x5A) {
-        throw new Error("Invalid or corrupt TI file layout length.");
-    }
-    
-    // TI-89 files (*.89i, *.89v, etc.) store variable lengths at offset 0x44
-    const dataLenLSB = rawFileBytes[0x44];
-    const dataLenMSB = rawFileBytes[0x45];
-    const variableDataLength = dataLenLSB | (dataLenMSB << 8);
-    
-    // RTS header payload spans 16 bytes starting at 0x4A
-    const rtsPayload = rawFileBytes.slice(0x4A, 0x5A);
-    const dataPayload = rawFileBytes.slice(0x5A, 0x5A + variableDataLength);
-
-    function parseCommandIDs(result) {
-        const cmds = [];
-        if (!result || result.status !== 'ok' || !result.data) return cmds;
-        
-        const view = new DataView(result.data.buffer);
-        let offset = 0;
-        
-        // Print raw incoming buffer hex for immediate physical verification
-        const rawHex = Array.from(new Uint8Array(result.data.buffer)).map(b => b.toString(16).padStart(2, '0')).join(' ');
-        console.log(`Raw bytes received: ${rawHex}`);
-
-        while (offset + 6 <= view.byteLength) {
-            if (view.getUint8(offset) === 0x21) {
-                const linkPacketLen = view.getUint8(offset + 2) | (view.getUint8(offset + 3) << 8);
-                const cmd = view.getUint8(offset + 5);
-                cmds.push(cmd);
-                offset += 4 + linkPacketLen;
-            } else {
-                offset++; // Advance safely if out of alignment sync
-            }
-        }
-        return cmds;
-    }
-
-    // 1. Send Request to Send (RTS)
-    log("Sending Request to Send (RTS)...");
-    const rtsPacket = makeUSBDirectPacket(0x06, rtsPayload);
-    await usbDevice.transferOut(endpointOut, rtsPacket);
-
-    // 2. Read response loop
-    log("Waiting for Clear To Send (CTS)...");
-    let hasCTS = false;
-    let attempts = 0;
-    
-    while (!hasCTS && attempts < 10) {
-        attempts++;
-        let response = await usbDevice.transferIn(endpointIn, 64);
-        let receivedCmds = parseCommandIDs(response);
-        
-        log(`Read attempt #${attempts}. Found Commands: ${receivedCmds.map(c => '0x' + c.toString(16)).join(', ')}`);
-        
-        if (receivedCmds.includes(0x09)) {
-            hasCTS = true;
-            break;
-        }
-        // If calculator sends an error/rejection code (like 0x5A or an invalid command response)
-        if (receivedCmds.length > 0 && !receivedCmds.includes(0x56)) {
-            throw new Error(`Calculator explicitly rejected or didn't understand the request. Codes: ${receivedCmds.map(c => '0x' + c.toString(16)).join(', ')}`);
-        }
-        
-        // Brief artificial pause to let hardware keep up
-        await new Promise(r => setTimeout(r, 100));
-    }
-
-    if (!hasCTS) {
-        throw new Error("Timed out waiting for Clear To Send (CTS). Check that the calculator is turned on, sitting on the home screen, and not busy.");
-    }
-
-    // 3. Acknowledge the CTS back to the calculator
-    log("Acknowledging CTS...");
-    const ackPacket = makeUSBDirectPacket(0x56, new Uint8Array(0));
-    await usbDevice.transferOut(endpointOut, ackPacket);
-
-    // 4. Send actual data payload
-    log("Sending variable data payloads...");
-    const dataPacket = makeUSBDirectPacket(0x15, dataPayload);
-    await usbDevice.transferOut(endpointOut, dataPacket);
-
-    // 5. Read calculator's final ACK
-    log("Waiting for data acknowledgment...");
-    let finalResponse = await usbDevice.transferIn(endpointIn, 64);
-    let finalCmds = parseCommandIDs(finalResponse);
-    
-    if (finalCmds.includes(0x56)) {
-        log("File sent and successfully accepted by TI-89 Titanium!");
-    } else {
-        log(`Data transmitted, but unexpected final code or no response.`);
-    }
 }
 </script>
 </body>
